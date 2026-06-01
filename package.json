@@ -1,0 +1,62 @@
+{
+  "name": "meetingsdk",
+  "version": "1.0.0",
+  "description": "React WebRTC Meeting SDK",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "require": "./dist/react.js",
+      "import": "./dist/react.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "dev": "tsup src/index.ts --watch"
+  },
+  "keywords": [
+    "react",
+    "meeting",
+    "video",
+    "conference",
+    "webrtc",
+    "sdk",
+    "rust",
+    "sdk",
+    "typescript"
+  ],
+  "author": "Afolabi Mubarak",
+  "license": "ISC",
+  "homepage": "https://github.com/Megabyte-webdev/meetingsdk",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Megabyte-webdev/meetingsdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Megabyte-webdev/meetingsdk/issues"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.2"
+  }
+}
