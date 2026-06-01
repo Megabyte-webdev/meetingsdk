@@ -1,3 +1,4 @@
+import { SDK_CONFIG } from "../config/ws";
 import { MeetingState, Participant } from "./MeetingState";
 
 type Events = {
@@ -16,9 +17,9 @@ export class VideoSDKCore {
   private localStream: MediaStream | null = null;
 
   constructor(
-    private url: string,
     private state: MeetingState,
     private events: Events = {},
+    private url: string = SDK_CONFIG.wsUrl,
   ) {
     this.myId = localStorage.getItem("vsdk_id") || crypto.randomUUID();
 

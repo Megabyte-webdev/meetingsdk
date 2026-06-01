@@ -1,0 +1,3 @@
+export const SDK_CONFIG = {
+  wsUrl: "wss:///rust-video-server-sfyf.onrender.com",
+};

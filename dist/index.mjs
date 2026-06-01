@@ -1,9 +1,14 @@
+// src/config/ws.ts
+var SDK_CONFIG = {
+  wsUrl: "wss:///rust-video-server-sfyf.onrender.com"
+};
+
 // src/core/VideoCore.ts
 var VideoSDKCore = class {
-  constructor(url, state, events = {}) {
-    this.url = url;
+  constructor(state, events = {}, url = SDK_CONFIG.wsUrl) {
     this.state = state;
     this.events = events;
+    this.url = url;
     this.ws = null;
     this.peers = {};
     this.initiators = /* @__PURE__ */ new Set();

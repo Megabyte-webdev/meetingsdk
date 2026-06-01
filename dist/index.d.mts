@@ -29,16 +29,16 @@ type Events = {
     onUserLeft?: (id: string) => void;
 };
 declare class VideoSDKCore {
-    private url;
     private state;
     private events;
+    private url;
     private ws;
     private peers;
     private initiators;
     private myId;
     private roomId;
     private localStream;
-    constructor(url: string, state: MeetingState, events?: Events);
+    constructor(state: MeetingState, events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
     connect(roomId: string, name: string): Promise<void>;
     private handle;
