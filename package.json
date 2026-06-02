@@ -1,10 +1,13 @@
 {
-  "name": "meetingsdk",
-  "version": "1.0.0",
+  "name": "@afosecure/meetingsdk",
+  "version": "1.0.1",
   "description": "A modern, lightweight React SDK for building peer-to-peer video communication applications. Built on WebRTC with a clean, composable rust API.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist"
   ],
@@ -25,6 +28,8 @@
     "dev": "tsup src/index.ts --watch"
   },
   "keywords": [
+    "afosecure",
+    "call",
     "react",
     "meeting",
     "video",

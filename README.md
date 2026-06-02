@@ -1,315 +1,207 @@
-# VideoSDK - React Video Meeting Library
+# 📹 @afosecure/meetingsdk — React Video Meeting SDK
 
-A modern, lightweight React SDK for building peer-to-peer video communication applications. Built on WebRTC with a clean, composable API.
+A modern, lightweight React SDK for building peer-to-peer video communication applications using WebRTC. Designed with a clean, composable API and reactive state management.
+
+---
 
 ## Features
 
-- **WebRTC P2P Video** - Direct peer-to-peer video connections
-- **React Hooks** - Composable React hooks for easy integration
-- **Simple API** - Intuitive, easy-to-understand interface
-- **State Management** - Built-in reactive state management
-- **Lightweight** - Minimal dependencies, small bundle size
-- **TypeScript** - Full TypeScript support with type definitions
+- WebRTC peer-to-peer video (no central media server required)
+- React Hooks API for seamless integration
+- Reactive state system for participants & streams
+- Lightweight core optimized for performance
+- Flexible WebSocket signaling backend support
+- Full TypeScript support
 
-## Installation
+---
+
+## 📦 Installation
 
 ```bash
-npm install meetingsdk
+npm install @afosecure/meetingsdk
 # or
-yarn add meetingsdk
+yarn add @afosecure/meetingsdk
 # or
-pnpm add meetingsdk
+pnpm add @afosecure/meetingsdk
 ```
+
+---
 
 ## Quick Start
 
-### 1. Initialize the SDK
-
-```typescript
-import { MeetingState, VideoSDKCore } from "meetingsdk";
-
-const state = new MeetingState();
-const core = new VideoSDKCore("ws://your-server:8080", state);
-```
-
-### 2. Setup React Provider
-
-Wrap your app with `MeetingProvider`:
+### 1. Initialize SDK
 
 ```tsx
-import { MeetingProvider } from "meetingsdk";
+import { useState } from "react";
+import {
+  MeetingProvider,
+  MeetingState,
+  VideoSDKCore,
+} from "@afosecure/meetingsdk";
 
 function App() {
+  const [state] = useState(() => new MeetingState());
+
   const [core] = useState(
-    () => new VideoSDKCore("ws://your-server:8080", new MeetingState()),
+    () =>
+      new VideoSDKCore(state, {
+        onTrack: (stream, peerId) => {
+          console.log("📹 Stream from:", peerId);
+        },
+        onUserJoined: (participant) => {
+          console.log("👤 Joined:", participant.name);
+        },
+        onUserLeft: (userId) => {
+          console.log("👋 Left:", userId);
+        },
+      }),
   );
 
   return (
     <MeetingProvider core={core}>
-      <YourApp />
+      <VideoCall />
     </MeetingProvider>
   );
 }
+
+export default App;
 ```
 
-### 3. Use the Hooks
+---
+
+### 2. Basic Video Call
 
 ```tsx
-import {
-  useMeeting,
-  useParticipants,
-  useRemoteVideo,
-  useLocalStream,
-} from "meetingsdk";
+import { useRef, useState } from "react";
+import { useMeeting, useParticipants } from "@afosecure/meetingsdk";
 
 function VideoCall() {
-  const { join, startLocalStream, leave } = useMeeting();
+  const { join, startLocalStream, leave, localParticipant } = useMeeting();
   const participants = useParticipants();
-  const localStream = useLocalStream();
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+
+  const [roomId, setRoomId] = useState("");
+  const [name, setName] = useState("");
 
   const handleJoin = async () => {
-    const videoEl = document.getElementById("localVideo");
-    await startLocalStream(videoEl, "Your Name");
-    await join("room-id");
+    if (!localVideoRef.current) return;
+
+    await startLocalStream(localVideoRef.current, name);
+    await join(roomId, name);
   };
 
   return (
     <div>
-      <button onClick={handleJoin}>Join Meeting</button>
-      <video id="localVideo" autoplay muted></video>
+      {!localParticipant ? (
+        <>
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+          <input value={roomId} onChange={(e) => setRoomId(e.target.value)} />
+          <button onClick={handleJoin}>Join Meeting</button>
+        </>
+      ) : (
+        <>
+          <video ref={localVideoRef} autoPlay muted />
+          <button onClick={leave}>Leave</button>
 
-      {participants.map((p) => (
-        <RemoteVideo key={p.id} participant={p} />
-      ))}
+          {participants.map((p) => (
+            <div key={p.id}>{p.name}</div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
 ```
+
+---
 
 ## Core Concepts
 
 ### MeetingState
 
-Central state management for your meeting. Tracks participants and streams.
-
-```typescript
+```ts
 const state = new MeetingState();
 
-// Get all participants
-state.getParticipants(); // Participant[]
+state.getParticipants();
 
-// Subscribe to state changes
-const unsubscribe = state.subscribe(() => {
-  console.log("State updated!");
+state.subscribe(() => {
+  console.log("updated");
 });
-
-// Cleanup
-unsubscribe();
 ```
+
+---
 
 ### VideoSDKCore
 
-Main SDK class for managing connections and communication.
-
-```typescript
-const core = new VideoSDKCore(serverUrl, state, {
-  onTrack: (stream, peerId) => console.log("Got stream from", peerId),
-  onUserJoined: (participant) => console.log("User joined:", participant),
-  onUserLeft: (userId) => console.log("User left:", userId),
+```ts
+const core = new VideoSDKCore(state, {
+  onTrack: (stream, peerId) => {},
+  onUserJoined: (p) => {},
+  onUserLeft: (id) => {},
 });
-
-// Initialize local video
-await core.initLocal(videoElement, "Your Name");
-
-// Join a meeting
-await core.connect("room-id", "Your Name");
-
-// Leave the meeting
-core.disconnect();
 ```
 
-## React Hooks API
+---
+
+## Hooks API
 
 ### useMeeting()
 
-Get meeting control methods and info.
-
-```tsx
+```ts
 const { join, startLocalStream, leave, localParticipant, meetingId } =
   useMeeting();
 ```
 
-**Returns:**
-
-- `join(roomId: string, name: string): Promise<void>` - Join a meeting
-- `startLocalStream(element: HTMLVideoElement, name: string): Promise<void>` - Start local video
-- `leave(): void` - Leave the meeting
-- `localParticipant: Participant | null` - Current user's info
-- `meetingId: string | null` - Current room ID
+---
 
 ### useParticipants()
 
-Get list of all participants in the meeting.
-
-```tsx
-const participants = useParticipants(); // Participant[]
-
-participants.forEach((p) => {
-  console.log(p.id, p.name);
-});
+```ts
+const participants = useParticipants();
 ```
 
-**Returns:** `Participant[]`
+---
 
-### useRemoteVideo(participantId)
-
-Attach remote video stream to an element.
+### useRemoteVideo()
 
 ```tsx
-const videoRef = useRemoteVideo(participantId);
+const ref = useRemoteVideo(participantId);
 
-return <video ref={videoRef} autoplay />;
+return <video ref={ref} autoPlay />;
 ```
 
-**Parameters:**
-
-- `participantId: string` - The ID of the remote participant
-
-**Returns:** `React.RefObject<HTMLVideoElement>`
+---
 
 ### useLocalStream()
 
-Get the local media stream.
-
-```tsx
-const localStream = useLocalStream();
-
-if (localStream) {
-  const videoTrack = localStream.getVideoTracks()[0];
-  // Use the track...
-}
+```ts
+const stream = useLocalStream();
 ```
 
-**Returns:** `MediaStream | null`
+---
 
 ### useStreams()
 
-Get a map of all streams keyed by participant ID.
-
-```tsx
-const streams = useStreams(); // Map<string, MediaStream>
-
-streams.forEach((stream, participantId) => {
-  console.log("Stream from:", participantId);
-});
+```ts
+const streams = useStreams();
 ```
 
-**Returns:** `Map<string, MediaStream>`
-
-### useMeetingContext()
-
-Access the raw meeting context (advanced).
-
-```tsx
-const { core, state } = useMeetingContext();
-
-// Access core SDK directly
-core.disconnect();
-
-// Access raw state
-state.participants.forEach((p) => {
-  console.log(p);
-});
-```
-
-**Returns:** `{ core: VideoSDKCore, state: MeetingState }`
+---
 
 ## Complete Example
 
 ```tsx
-import React, { useRef, useState } from "react";
-import {
-  MeetingProvider,
-  VideoSDKCore,
-  MeetingState,
-  useMeeting,
-  useParticipants,
-  useRemoteVideo,
-} from "meetingsdk";
-
-function RemoteVideo({ participantId }) {
-  const ref = useRemoteVideo(participantId);
-  return <video ref={ref} autoplay style={{ width: "200px" }} />;
-}
-
-function VideoCallContent() {
-  const { join, startLocalStream, leave, localParticipant } = useMeeting();
-  const participants = useParticipants();
-  const [roomId, setRoomId] = useState("");
-  const [name, setName] = useState("");
-  const localVideoRef = useRef(null);
-
-  const handleJoin = async () => {
-    if (!localVideoRef.current) return;
-
-    try {
-      await startLocalStream(localVideoRef.current, name);
-      await join(roomId);
-    } catch (error) {
-      console.error("Failed to join:", error);
-    }
-  };
-
-  return (
-    <div style={{ padding: "20px" }}>
-      <h1>Video Meeting</h1>
-
-      {!localParticipant ? (
-        <div>
-          <input
-            type="text"
-            placeholder="Your name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <input
-            type="text"
-            placeholder="Room ID"
-            value={roomId}
-            onChange={(e) => setRoomId(e.target.value)}
-          />
-          <button onClick={handleJoin}>Join Call</button>
-        </div>
-      ) : (
-        <div>
-          <h2>In Call</h2>
-          <p>You: {localParticipant.name}</p>
-          <video
-            ref={localVideoRef}
-            autoplay
-            muted
-            style={{ width: "300px", border: "2px solid blue" }}
-          />
-          <button onClick={leave}>Leave Call</button>
-
-          <h3>Participants ({participants.length})</h3>
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            {participants.map((participant) => (
-              <div key={participant.id}>
-                <p>{participant.name}</p>
-                <RemoteVideo participantId={participant.id} />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function App() {
   const [state] = useState(() => new MeetingState());
-  const [core] = useState(() => new VideoSDKCore("ws://localhost:8080", state));
+
+  const [core] = useState(
+    () =>
+      new VideoSDKCore(state, {
+        onTrack: () => {},
+        onUserJoined: () => {},
+        onUserLeft: () => {},
+      }),
+  );
 
   return (
     <MeetingProvider core={core}>
@@ -319,159 +211,45 @@ export default function App() {
 }
 ```
 
+---
+
 ## Server Requirements
 
-Your server should handle WebSocket connections and support the following message types:
+Your WebSocket server must support:
 
-```typescript
-// Client to Server
-interface JoinMessage {
-  type: "JOIN";
-  room_id: string;
-  user_id: string;
-  sender_name: string;
-}
+### Client → Server
 
-interface OfferMessage {
-  type: "OFFER";
-  payload: string; // SDP
-  sender: string;
-  target: string;
-}
+- JOIN
+- OFFER
+- ANSWER
+- ICE
 
-interface AnswerMessage {
-  type: "ANSWER";
-  payload: string; // SDP
-  sender: string;
-  target: string;
-}
+### Server → Client
 
-interface IceMessage {
-  type: "ICE";
-  payload: string; // JSON stringified RTCIceCandidate
-  sender: string;
-  target: string;
-}
+- EXISTING_USERS
+- USER_JOINED
+- USER_LEFT
 
-// Server to Client
-interface ExistingUsersMessage {
-  type: "EXISTING_USERS";
-  participants: Participant[];
-}
-
-interface UserJoinedMessage {
-  type: "USER_JOINED";
-  participant: Participant;
-}
-
-interface UserLeftMessage {
-  type: "USER_LEFT";
-  peerId: string;
-}
-```
-
-## Advanced Usage
-
-### Custom Event Handlers
-
-```typescript
-const core = new VideoSDKCore("ws://localhost:8080", state, {
-  onTrack: (stream, peerId) => {
-    console.log("Received stream from:", peerId);
-    // Handle incoming stream
-  },
-  onUserJoined: (participant) => {
-    console.log("User joined:", participant.name);
-    // Show notification
-  },
-  onUserLeft: (userId) => {
-    console.log("User left:", userId);
-    // Clean up UI
-  },
-});
-```
-
-### Accessing Raw State
-
-For more control, access the state directly:
-
-```tsx
-function AdvancedExample() {
-  const { state } = useMeetingContext();
-
-  // Direct access to participants map
-  console.log(state.participants);
-
-  // Direct access to streams
-  console.log(state.streams);
-
-  // Local participant
-  console.log(state.localParticipant);
-
-  // Local stream
-  console.log(state.localStream);
-
-  return null;
-}
-```
+---
 
 ## Performance Tips
 
-1. **Memoize Components** - Use `React.memo()` for video components
-2. **Lazy Load** - Consider code-splitting the SDK
-3. **Stop Tracks** - Always stop tracks before disconnecting
-4. **ICE Servers** - Configure multiple STUN servers for better connectivity
-5. **Video Constraints** - Set appropriate video constraints for your use case
+- Stop media tracks on leave
+- Memoize participant components
+- Use multiple STUN servers
+- Avoid re-rendering video elements
 
-```typescript
-// Example with constraints
-await navigator.mediaDevices.getUserMedia({
-  video: {
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-  },
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-  },
-});
-```
+---
 
 ## Browser Support
 
-- Chrome/Edge: 54+
-- Firefox: 55+
-- Safari: 11+
-- Mobile browsers with WebRTC support
+- Chrome 54+
+- Firefox 55+
+- Safari 11+
+- Edge 79+
 
-## Troubleshooting
+---
 
-### No video showing
+## 📄 License
 
-- Check browser permissions for camera/microphone
-- Ensure server is running and WebSocket is accessible
-- Verify `startLocalStream()` is called before `join()`
-
-### Participants not connecting
-
-- Check WebSocket connection status
-- Verify STUN server is accessible
-- Check browser console for ICE errors
-
-### Audio/Video issues
-
-- Check user has granted permissions
-- Verify constraints are compatible with device
-- Check for resource conflicts with other apps
-
-## License
-
-ISC
-
-## Contributing
-
-Contributions welcome! Please submit PRs to improve the SDK.
-
-## Support
-
-For issues, questions, or suggestions, please open an issue on GitHub.
+MIT
