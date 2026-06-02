@@ -1,11 +1,6 @@
 import { SDK_CONFIG } from "../config/ws";
-import { MeetingState, Participant } from "./MeetingState";
-
-type Events = {
-  onTrack?: (stream: MediaStream, peerId: string) => void;
-  onUserJoined?: (p: Participant) => void;
-  onUserLeft?: (id: string) => void;
-};
+import { ChatInput, ChatMessage, Events } from "../types/meeting";
+import { MeetingState } from "./MeetingState";
 
 export class VideoSDKCore {
   private ws: WebSocket | null = null;
@@ -15,6 +10,9 @@ export class VideoSDKCore {
   private myId: string;
   private roomId: string | null = null;
   private localStream: MediaStream | null = null;
+  private screenStream: MediaStream | null = null;
+  private isScreenSharing = false;
+  private pingInterval: any = null;
 
   constructor(
     private state: MeetingState,
@@ -38,6 +36,13 @@ export class VideoSDKCore {
     this.state.localParticipant = {
       id: this.myId,
       name,
+      media: {
+        cameraStream: this.localStream,
+        screenStream: null,
+        micEnabled: true,
+        camEnabled: true,
+        isScreenSharing: false,
+      },
     };
 
     this.state.localStream = this.localStream;
@@ -46,6 +51,8 @@ export class VideoSDKCore {
   // ---------------- CONNECT ----------------
   async connect(roomId: string, name: string) {
     this.roomId = roomId;
+
+    this.reset();
 
     return new Promise<void>((resolve, reject) => {
       this.ws = new WebSocket(this.url);
@@ -58,15 +65,52 @@ export class VideoSDKCore {
           sender_name: name,
         });
 
+        this.startHeartbeat();
+
         resolve();
+      };
+
+      this.ws.onerror = (err) => {
+        console.error("WebSocket Error:", err);
+        reject(new Error("WebSocket connection failed"));
+      };
+
+      this.ws.onclose = (e) => {
+        console.error("WebSocket Closed:", e.code, e.reason, e.wasClean);
       };
 
       this.ws.onmessage = async (e) => {
         await this.handle(JSON.parse(e.data));
       };
-
-      this.ws.onerror = reject;
     });
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+
+    this.pingInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+      this.send({
+        type: "PING",
+        client_ts: Date.now(),
+      });
+    }, 20000); // every 20s
+  }
+  private stopHeartbeat() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  // ---------------- RESET ----------------
+  private reset() {
+    Object.values(this.peers).forEach((pc) => pc.close());
+
+    this.peers = {};
+
+    this.state.reset();
   }
 
   // ---------------- HANDLE SIGNALS ----------------
@@ -131,13 +175,41 @@ export class VideoSDKCore {
         break;
 
       case "USER_LEFT":
-        this.closePeer(msg.peerId);
+        const peerId = msg.participant.id;
+        this.closePeer(peerId);
 
-        this.state.removeParticipant(msg.peerId);
+        this.state.removeParticipant(peerId);
 
-        this.events.onUserLeft?.(msg.peerId);
+        this.events.onUserLeft?.(peerId);
 
         break;
+      case "CHAT_MESSAGE": {
+        const newMsg = msg.data;
+
+        if (newMsg.sender_id === this.myId) break; // already added optimistically
+        this.state.addChatMessage({
+          ...newMsg,
+          text: newMsg.message,
+          sender_id: newMsg.sender_id,
+          sender_name: newMsg.sender_name,
+          timestamp: new Date(newMsg.timestamp).getTime(),
+        });
+
+        this.events.onChatMessage?.(msg);
+        break;
+      }
+      case "SCREEN_SHARE_START": {
+        this.events.onScreenShareStarted?.(
+          msg.sender,
+          this.state.getStreamById(msg.sender)!,
+        );
+        break;
+      }
+
+      case "SCREEN_SHARE_STOP": {
+        this.events.onScreenShareStopped?.(msg.sender);
+        break;
+      }
     }
   }
 
@@ -239,12 +311,108 @@ export class VideoSDKCore {
     this.state.removeStream(id);
   }
 
+  async startScreenShare() {
+    this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+
+    this.isScreenSharing = true;
+
+    // Replace video track in all peer connections
+    const videoTrack = this.screenStream.getVideoTracks()[0];
+
+    Object.values(this.peers).forEach((pc) => {
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+
+      sender?.replaceTrack(videoTrack);
+    });
+
+    // notify others via signaling
+    this.send({
+      type: "SCREEN_SHARE_START",
+      sender: this.myId,
+      room_id: this.roomId,
+    });
+
+    return this.screenStream;
+  }
+
+  stopScreenShare() {
+    if (!this.screenStream) return;
+
+    this.screenStream.getTracks().forEach((t) => t.stop());
+
+    this.screenStream = null;
+    this.isScreenSharing = false;
+
+    // restore camera
+    const cameraTrack = this.localStream?.getVideoTracks()[0];
+
+    Object.values(this.peers).forEach((pc) => {
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+
+      if (cameraTrack) {
+        sender?.replaceTrack(cameraTrack);
+      }
+    });
+
+    this.send({
+      type: "SCREEN_SHARE_STOP",
+      sender: this.myId,
+      room_id: this.roomId,
+    });
+  }
+
+  sendChatMessage(payload: ChatInput) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn("WS not connected");
+      return;
+    }
+
+    if (!this.roomId) {
+      console.warn("No roomId set");
+      return;
+    }
+
+    const isPrivate = !!payload?.target;
+
+    const senderName = this.state.localParticipant?.name || "Anonymous";
+
+    const msg: ChatMessage = {
+      id: crypto.randomUUID(),
+      sender_id: this.myId,
+      sender_name: senderName,
+      text: payload.message.trim(),
+      timestamp: Date.now(),
+      reply_to: payload.reply_to ?? null,
+      target: isPrivate ? (payload?.reply_to?.id ?? null) : null,
+    };
+
+    // optimistic UI update
+    this.state.addChatMessage(msg);
+
+    // send protocol payload (clean + consistent)
+    this.send({
+      type: "CHAT_MESSAGE",
+      message: payload.message.trim(),
+      user_id: this.myId,
+      sender_name: senderName,
+      room_id: this.roomId,
+      target: isPrivate ? (payload.target ?? null) : null,
+      reply_to: payload.reply_to ?? null,
+
+      client_ts: Date.now(),
+    });
+  }
+
   disconnect() {
     // Close all peer connections
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
     this.initiators.clear();
 
+    this.stopHeartbeat();
     // Close WebSocket
     if (this.ws) {
       this.ws.close();
@@ -261,6 +429,7 @@ export class VideoSDKCore {
     this.roomId = null;
     this.state.participants.clear();
     this.state.streams.clear();
+    this.state.clearChat();
   }
 
   // ---------------- SEND ----------------

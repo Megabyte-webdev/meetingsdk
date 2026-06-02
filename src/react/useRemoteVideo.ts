@@ -2,25 +2,42 @@ import { useEffect, useRef } from "react";
 import { useMeetingContext } from "./MeetingProvider";
 
 export const useRemoteVideo = (participantId: string) => {
-  const ref = useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const { state } = useMeetingContext();
 
   useEffect(() => {
-    const attach = () => {
+    const attachStream = () => {
+      const video = videoRef.current;
       const stream = state.getStreamById(participantId);
-      if (stream && ref.current) {
-        ref.current.srcObject = stream;
+
+      if (!video || !stream) return;
+
+      if (video.srcObject !== stream) {
+        video.srcObject = stream;
+
+        video.play?.().catch((err) => {
+          console.warn(
+            `Failed to autoplay remote video for participant ${participantId}`,
+            err,
+          );
+        });
       }
     };
 
-    attach();
+    attachStream();
 
-    const unsub = state.subscribe(() => {
-      attach();
+    const unsubscribe = state.subscribe(() => {
+      attachStream();
     });
 
-    return () => unsub();
+    return () => {
+      unsubscribe();
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
   }, [participantId, state]);
 
-  return ref;
+  return videoRef;
 };

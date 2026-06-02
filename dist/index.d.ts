@@ -2,17 +2,52 @@ import * as react_jsx_runtime from 'react/jsx-runtime';
 import * as React from 'react';
 import React__default from 'react';
 
+type Events = {
+    onTrack?: (stream: MediaStream, peerId: string) => void;
+    onUserJoined?: (p: Participant) => void;
+    onUserLeft?: (id: string) => void;
+    onChatMessage?: (msg: ChatMessage) => void;
+    onScreenShareStarted?: (peerId: string, stream: MediaStream) => void;
+    onScreenShareStopped?: (peerId: string) => void;
+};
+type ChatMessage = {
+    id: string;
+    text: string;
+    sender_id: string;
+    sender_name?: string;
+    timestamp: number;
+    reply_to?: any;
+    target?: string | null;
+};
 type Participant = {
     id: string;
-    name: string;
+    name?: string;
+    media?: ParticipantMedia;
 };
 type Listener = () => void;
+type ChatInput = {
+    message: string;
+    reply_to?: {
+        id: string;
+        name: string;
+    } | null;
+    target?: string | null;
+};
+type ParticipantMedia = {
+    cameraStream: MediaStream | null;
+    screenStream: MediaStream | null;
+    micEnabled: boolean;
+    camEnabled: boolean;
+    isScreenSharing: boolean;
+};
+
 declare class MeetingState {
     participants: Map<string, Participant>;
     streams: Map<string, MediaStream>;
     localParticipant: Participant | null;
     localStream: MediaStream | null;
     private listeners;
+    chatMessages: Map<string, ChatMessage>;
     subscribe(fn: Listener): () => void;
     private notify;
     addParticipant(p: Participant): boolean;
@@ -20,14 +55,13 @@ declare class MeetingState {
     setStream(id: string, stream: MediaStream): void;
     getStreamById(id: string): MediaStream | undefined;
     removeStream(id: string): void;
+    addChatMessage(msg: ChatMessage): void;
+    getChatMessages(): ChatMessage[];
+    clearChat(): void;
     getParticipants(): Participant[];
+    reset(): void;
 }
 
-type Events = {
-    onTrack?: (stream: MediaStream, peerId: string) => void;
-    onUserJoined?: (p: Participant) => void;
-    onUserLeft?: (id: string) => void;
-};
 declare class VideoSDKCore {
     private state;
     private events;
@@ -38,14 +72,23 @@ declare class VideoSDKCore {
     private myId;
     private roomId;
     private localStream;
+    private screenStream;
+    private isScreenSharing;
+    private pingInterval;
     constructor(state: MeetingState, events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
     connect(roomId: string, name: string): Promise<void>;
+    private startHeartbeat;
+    private stopHeartbeat;
+    private reset;
     private handle;
     private createPeer;
     private createOffer;
     private handleOffer;
     private closePeer;
+    startScreenShare(): Promise<MediaStream>;
+    stopScreenShare(): void;
+    sendChatMessage(payload: ChatInput): void;
     disconnect(): void;
     private send;
 }
@@ -53,6 +96,7 @@ declare class VideoSDKCore {
 type MeetingContextType = {
     core: VideoSDKCore;
     state: MeetingState;
+    sendMessage: (payload: ChatInput) => void;
 };
 declare const MeetingProvider: ({ core, children, }: {
     core: VideoSDKCore;
@@ -66,6 +110,10 @@ declare const useMeeting: () => {
     leave: () => void;
     meetingId: any;
     localParticipant: Participant | null;
+    usePubSub(type: "SECURE_CHAT"): {
+        messages: Map<string, ChatMessage>;
+        publish: (payload: ChatInput) => void;
+    };
 };
 
 declare const useParticipants: () => Participant[];
@@ -76,4 +124,4 @@ declare const useRemoteVideo: (participantId: string) => React.RefObject<HTMLVid
 
 declare const useLocalStream: () => MediaStream | null;
 
-export { MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalStream, useMeeting, useMeetingContext, useParticipants, useRemoteVideo, useStreams };
+export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalStream, useMeeting, useMeetingContext, useParticipants, useRemoteVideo, useStreams };

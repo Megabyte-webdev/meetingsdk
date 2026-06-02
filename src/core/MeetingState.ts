@@ -1,9 +1,4 @@
-export type Participant = {
-  id: string;
-  name: string;
-};
-
-type Listener = () => void;
+import { ChatMessage, Listener, Participant } from "../types/meeting";
 
 export class MeetingState {
   participants = new Map<string, Participant>();
@@ -13,6 +8,8 @@ export class MeetingState {
   localStream: MediaStream | null = null;
 
   private listeners: Set<Listener> = new Set();
+
+  chatMessages = new Map<string, ChatMessage>();
 
   // ---- reactive system ----
   subscribe(fn: Listener): () => void {
@@ -55,8 +52,33 @@ export class MeetingState {
     this.notify();
   }
 
+  addChatMessage(msg: ChatMessage) {
+    this.chatMessages.set(msg.id, msg);
+    this.notify();
+  }
+
+  getChatMessages() {
+    return Array.from(this.chatMessages.values()).sort(
+      (a, b) => a.timestamp - b.timestamp,
+    );
+  }
+
+  clearChat() {
+    this.chatMessages.clear();
+    this.notify();
+  }
+
   // ---- helpers ----
   getParticipants() {
     return Array.from(this.participants.values());
+  }
+
+  reset() {
+    this.participants.clear();
+    this.streams.clear();
+    this.localParticipant = null;
+    this.localStream = null;
+    this.chatMessages.clear();
+    this.notify();
   }
 }

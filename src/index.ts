@@ -1,7 +1,7 @@
 // Core exports
 export { VideoSDKCore } from "./core/VideoCore";
 export { MeetingState } from "./core/MeetingState";
-export type { Participant } from "./core/MeetingState";
+export type { Participant, ChatInput } from "./types/meeting";
 
 // React hooks and components
 export { MeetingProvider, useMeetingContext } from "./react/MeetingProvider";

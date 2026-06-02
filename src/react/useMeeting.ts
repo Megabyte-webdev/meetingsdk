@@ -11,5 +11,14 @@ export const useMeeting = () => {
     meetingId: (core as any).roomId,
 
     localParticipant: state.localParticipant,
+    usePubSub(type: "SECURE_CHAT") {
+      if (type !== "SECURE_CHAT")
+        throw new Error("Only 'SECURE_CHAT' pubsub is supported for now");
+
+      return {
+        messages: state.chatMessages,
+        publish: core.sendChatMessage.bind(core),
+      };
+    },
   };
 };

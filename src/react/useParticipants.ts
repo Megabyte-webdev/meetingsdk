@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMeetingContext } from "./MeetingProvider";
-import { Participant } from "../core/MeetingState";
+import { Participant } from "../types/meeting";
 
 export const useParticipants = () => {
   const { state } = useMeetingContext();

@@ -7,10 +7,12 @@ import React, {
 } from "react";
 import { MeetingState } from "../core/MeetingState";
 import { VideoSDKCore } from "../core/VideoCore";
+import { ChatInput } from "../types/meeting";
 
 type MeetingContextType = {
   core: VideoSDKCore;
   state: MeetingState;
+  sendMessage: (payload: ChatInput) => void;
 };
 
 const MeetingContext = createContext<MeetingContextType | null>(null);
@@ -36,6 +38,7 @@ export const MeetingProvider = ({
     () => ({
       core,
       state: core["state"],
+      sendMessage: core.sendChatMessage.bind(core),
     }),
     [core],
   );

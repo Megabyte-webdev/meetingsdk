@@ -1,6 +1,6 @@
 // src/config/ws.ts
 var SDK_CONFIG = {
-  wsUrl: "wss:///rust-video-server-sfyf.onrender.com"
+  wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws"
 };
 
 // src/core/VideoCore.ts
@@ -14,6 +14,9 @@ var VideoSDKCore = class {
     this.initiators = /* @__PURE__ */ new Set();
     this.roomId = null;
     this.localStream = null;
+    this.screenStream = null;
+    this.isScreenSharing = false;
+    this.pingInterval = null;
     this.myId = localStorage.getItem("vsdk_id") || crypto.randomUUID();
     localStorage.setItem("vsdk_id", this.myId);
   }
@@ -26,13 +29,21 @@ var VideoSDKCore = class {
     video.srcObject = this.localStream;
     this.state.localParticipant = {
       id: this.myId,
-      name
+      name,
+      media: {
+        cameraStream: this.localStream,
+        screenStream: null,
+        micEnabled: true,
+        camEnabled: true,
+        isScreenSharing: false
+      }
     };
     this.state.localStream = this.localStream;
   }
   // ---------------- CONNECT ----------------
   async connect(roomId, name) {
     this.roomId = roomId;
+    this.reset();
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.url);
       this.ws.onopen = () => {
@@ -42,13 +53,42 @@ var VideoSDKCore = class {
           user_id: this.myId,
           sender_name: name
         });
+        this.startHeartbeat();
         resolve();
+      };
+      this.ws.onerror = (err) => {
+        console.error("WebSocket Error:", err);
+        reject(new Error("WebSocket connection failed"));
+      };
+      this.ws.onclose = (e) => {
+        console.error("WebSocket Closed:", e.code, e.reason, e.wasClean);
       };
       this.ws.onmessage = async (e) => {
         await this.handle(JSON.parse(e.data));
       };
-      this.ws.onerror = reject;
     });
+  }
+  startHeartbeat() {
+    this.stopHeartbeat();
+    this.pingInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.send({
+        type: "PING",
+        client_ts: Date.now()
+      });
+    }, 2e4);
+  }
+  stopHeartbeat() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+  // ---------------- RESET ----------------
+  reset() {
+    Object.values(this.peers).forEach((pc) => pc.close());
+    this.peers = {};
+    this.state.reset();
   }
   // ---------------- HANDLE SIGNALS ----------------
   async handle(msg) {
@@ -95,10 +135,35 @@ var VideoSDKCore = class {
         }
         break;
       case "USER_LEFT":
-        this.closePeer(msg.peerId);
-        this.state.removeParticipant(msg.peerId);
-        this.events.onUserLeft?.(msg.peerId);
+        const peerId = msg.participant.id;
+        this.closePeer(peerId);
+        this.state.removeParticipant(peerId);
+        this.events.onUserLeft?.(peerId);
         break;
+      case "CHAT_MESSAGE": {
+        const newMsg = msg.data;
+        if (newMsg.sender_id === this.myId) break;
+        this.state.addChatMessage({
+          ...newMsg,
+          text: newMsg.message,
+          sender_id: newMsg.sender_id,
+          sender_name: newMsg.sender_name,
+          timestamp: new Date(newMsg.timestamp).getTime()
+        });
+        this.events.onChatMessage?.(msg);
+        break;
+      }
+      case "SCREEN_SHARE_START": {
+        this.events.onScreenShareStarted?.(
+          msg.sender,
+          this.state.getStreamById(msg.sender)
+        );
+        break;
+      }
+      case "SCREEN_SHARE_STOP": {
+        this.events.onScreenShareStopped?.(msg.sender);
+        break;
+      }
     }
   }
   // ---------------- PEER ----------------
@@ -173,10 +238,79 @@ var VideoSDKCore = class {
     this.initiators.delete(id);
     this.state.removeStream(id);
   }
+  async startScreenShare() {
+    this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
+    this.isScreenSharing = true;
+    const videoTrack = this.screenStream.getVideoTracks()[0];
+    Object.values(this.peers).forEach((pc) => {
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      sender?.replaceTrack(videoTrack);
+    });
+    this.send({
+      type: "SCREEN_SHARE_START",
+      sender: this.myId,
+      room_id: this.roomId
+    });
+    return this.screenStream;
+  }
+  stopScreenShare() {
+    if (!this.screenStream) return;
+    this.screenStream.getTracks().forEach((t) => t.stop());
+    this.screenStream = null;
+    this.isScreenSharing = false;
+    const cameraTrack = this.localStream?.getVideoTracks()[0];
+    Object.values(this.peers).forEach((pc) => {
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (cameraTrack) {
+        sender?.replaceTrack(cameraTrack);
+      }
+    });
+    this.send({
+      type: "SCREEN_SHARE_STOP",
+      sender: this.myId,
+      room_id: this.roomId
+    });
+  }
+  sendChatMessage(payload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn("WS not connected");
+      return;
+    }
+    if (!this.roomId) {
+      console.warn("No roomId set");
+      return;
+    }
+    const isPrivate = !!payload?.target;
+    const senderName = this.state.localParticipant?.name || "Anonymous";
+    const msg = {
+      id: crypto.randomUUID(),
+      sender_id: this.myId,
+      sender_name: senderName,
+      text: payload.message.trim(),
+      timestamp: Date.now(),
+      reply_to: payload.reply_to ?? null,
+      target: isPrivate ? payload?.reply_to?.id ?? null : null
+    };
+    this.state.addChatMessage(msg);
+    this.send({
+      type: "CHAT_MESSAGE",
+      message: payload.message.trim(),
+      user_id: this.myId,
+      sender_name: senderName,
+      room_id: this.roomId,
+      target: isPrivate ? payload.target ?? null : null,
+      reply_to: payload.reply_to ?? null,
+      client_ts: Date.now()
+    });
+  }
   disconnect() {
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
     this.initiators.clear();
+    this.stopHeartbeat();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -188,6 +322,7 @@ var VideoSDKCore = class {
     this.roomId = null;
     this.state.participants.clear();
     this.state.streams.clear();
+    this.state.clearChat();
   }
   // ---------------- SEND ----------------
   send(msg) {
@@ -203,6 +338,7 @@ var MeetingState = class {
     this.localParticipant = null;
     this.localStream = null;
     this.listeners = /* @__PURE__ */ new Set();
+    this.chatMessages = /* @__PURE__ */ new Map();
   }
   // ---- reactive system ----
   subscribe(fn) {
@@ -238,9 +374,30 @@ var MeetingState = class {
     this.streams.delete(id);
     this.notify();
   }
+  addChatMessage(msg) {
+    this.chatMessages.set(msg.id, msg);
+    this.notify();
+  }
+  getChatMessages() {
+    return Array.from(this.chatMessages.values()).sort(
+      (a, b) => a.timestamp - b.timestamp
+    );
+  }
+  clearChat() {
+    this.chatMessages.clear();
+    this.notify();
+  }
   // ---- helpers ----
   getParticipants() {
     return Array.from(this.participants.values());
+  }
+  reset() {
+    this.participants.clear();
+    this.streams.clear();
+    this.localParticipant = null;
+    this.localStream = null;
+    this.chatMessages.clear();
+    this.notify();
   }
 };
 
@@ -268,7 +425,8 @@ var MeetingProvider = ({
   const value = useMemo(
     () => ({
       core,
-      state: core["state"]
+      state: core["state"],
+      sendMessage: core.sendChatMessage.bind(core)
     }),
     [core]
   );
@@ -288,7 +446,15 @@ var useMeeting = () => {
     startLocalStream: core.initLocal.bind(core),
     leave: core.disconnect.bind(core),
     meetingId: core.roomId,
-    localParticipant: state.localParticipant
+    localParticipant: state.localParticipant,
+    usePubSub(type) {
+      if (type !== "SECURE_CHAT")
+        throw new Error("Only 'SECURE_CHAT' pubsub is supported for now");
+      return {
+        messages: state.chatMessages,
+        publish: core.sendChatMessage.bind(core)
+      };
+    }
   };
 };
 
