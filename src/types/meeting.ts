@@ -1,5 +1,5 @@
 export type Events = {
-  onTrack?: (stream: MediaStream, peerId: string) => void;
+  onTrack?: (stream: MediaStream, peerId: string, id: string) => void;
   onUserJoined?: (p: Participant) => void;
   onUserLeft?: (id: string) => void;
   onChatMessage?: (msg: ChatMessage) => void;
@@ -34,8 +34,9 @@ export type ChatInput = {
 };
 
 export type ParticipantMedia = {
-  cameraStream: MediaStream | null;
-  screenStream: MediaStream | null;
+  stream?: MediaStream | null;
+  cameraTrack?: MediaStreamTrack;
+  screenTrack?: MediaStreamTrack;
   micEnabled: boolean;
   camEnabled: boolean;
   isScreenSharing: boolean;

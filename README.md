@@ -40,19 +40,17 @@ import {
 } from "@afosecure/meetingsdk";
 
 function App() {
-  const [state] = useState(() => new MeetingState());
-
   const [core] = useState(
     () =>
-      new VideoSDKCore(state, {
-        onTrack: (stream, peerId) => {
-          console.log("📹 Stream from:", peerId);
+      new VideoSDKCore({
+        onTrack: (_, peerId) => {
+          console.log("📹 Received stream from:", peerId);
         },
         onUserJoined: (participant) => {
-          console.log("👤 Joined:", participant.name);
+          console.log("👤 User joined:", participant.name);
         },
         onUserLeft: (userId) => {
-          console.log("👋 Left:", userId);
+          console.log("👤 User left:", userId);
         },
       }),
   );

@@ -3,10 +3,66 @@ var SDK_CONFIG = {
   wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws"
 };
 
+// src/core/MeetingState.ts
+var MeetingState = class {
+  constructor() {
+    this.participants = /* @__PURE__ */ new Map();
+    this.localParticipant = null;
+    this.localStream = null;
+    this.listeners = /* @__PURE__ */ new Set();
+    this.chatMessages = /* @__PURE__ */ new Map();
+  }
+  // ---- reactive system ----
+  subscribe(fn) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+  notify() {
+    this.listeners.forEach((fn) => fn());
+  }
+  // ---- participants ----
+  addParticipant(p) {
+    if (this.participants.has(p.id)) return false;
+    this.participants.set(p.id, p);
+    this.notify();
+    return true;
+  }
+  removeParticipant(id) {
+    this.participants.delete(id);
+    this.notify();
+  }
+  addChatMessage(msg) {
+    this.chatMessages.set(msg.id, msg);
+    this.notify();
+  }
+  getChatMessages() {
+    return Array.from(this.chatMessages.values()).sort(
+      (a, b) => a.timestamp - b.timestamp
+    );
+  }
+  clearChat() {
+    this.chatMessages.clear();
+    this.notify();
+  }
+  // ---- helpers ----
+  getParticipants() {
+    return Array.from(this.participants.values());
+  }
+  getParticipant(id) {
+    return this.participants.get(id) || null;
+  }
+  resetRemoteState() {
+    this.participants.clear();
+    this.chatMessages.clear();
+    this.notify();
+  }
+};
+
 // src/core/VideoCore.ts
 var VideoSDKCore = class {
-  constructor(state, events = {}, url = SDK_CONFIG.wsUrl) {
-    this.state = state;
+  constructor(events = {}, url = SDK_CONFIG.wsUrl) {
     this.events = events;
     this.url = url;
     this.ws = null;
@@ -17,11 +73,18 @@ var VideoSDKCore = class {
     this.screenStream = null;
     this.isScreenSharing = false;
     this.pingInterval = null;
+    this.pendingIceCandidates = {};
+    this.reconnectAttempts = 0;
+    this.participantName = "";
+    this.state = new MeetingState();
+    this.events = events;
+    this.url = url;
     this.myId = localStorage.getItem("vsdk_id") || crypto.randomUUID();
     localStorage.setItem("vsdk_id", this.myId);
   }
   // ---------------- STREAM ----------------
   async initLocal(video, name) {
+    this.participantName = name;
     this.localStream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true
@@ -31,8 +94,7 @@ var VideoSDKCore = class {
       id: this.myId,
       name,
       media: {
-        cameraStream: this.localStream,
-        screenStream: null,
+        stream: this.localStream,
         micEnabled: true,
         camEnabled: true,
         isScreenSharing: false
@@ -61,12 +123,27 @@ var VideoSDKCore = class {
         reject(new Error("WebSocket connection failed"));
       };
       this.ws.onclose = (e) => {
-        console.error("WebSocket Closed:", e.code, e.reason, e.wasClean);
+        console.error("WebSocket Closed", e.code, e.reason);
+        this.scheduleReconnect();
       };
       this.ws.onmessage = async (e) => {
         await this.handle(JSON.parse(e.data));
       };
     });
+  }
+  scheduleReconnect() {
+    if (!this.roomId) return;
+    const delay = Math.min(1e3 * Math.pow(2, this.reconnectAttempts), 3e4);
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = window.setTimeout(async () => {
+      try {
+        await this.connect(this.roomId, this.participantName);
+        this.reconnectAttempts = 0;
+      } catch {
+        this.reconnectAttempts++;
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
   startHeartbeat() {
     this.stopHeartbeat();
@@ -88,10 +165,13 @@ var VideoSDKCore = class {
   reset() {
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
-    this.state.reset();
+    this.initiators.clear();
+    this.pendingIceCandidates = {};
+    this.state.resetRemoteState();
   }
   // ---------------- HANDLE SIGNALS ----------------
   async handle(msg) {
+    var _a, _b, _c, _d;
     if (msg.sender === this.myId) return;
     switch (msg.type) {
       case "EXISTING_USERS":
@@ -125,15 +205,26 @@ var VideoSDKCore = class {
         });
         break;
       }
-      case "ICE":
+      case "ICE": {
+        const candidate = JSON.parse(msg.payload);
+        let pc = this.peers[msg.sender];
+        if (!pc) {
+          (_a = this.pendingIceCandidates)[_b = msg.sender] ?? (_a[_b] = []);
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
+        }
+        if (!pc.remoteDescription) {
+          (_c = this.pendingIceCandidates)[_d = msg.sender] ?? (_c[_d] = []);
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
+        }
         try {
-          await this.peers[msg.sender]?.addIceCandidate(
-            JSON.parse(msg.payload)
-          );
+          await pc.addIceCandidate(candidate);
         } catch (err) {
           console.warn("ICE error:", err);
         }
         break;
+      }
       case "USER_LEFT":
         const peerId = msg.participant.id;
         this.closePeer(peerId);
@@ -144,20 +235,20 @@ var VideoSDKCore = class {
         const newMsg = msg.data;
         if (newMsg.sender_id === this.myId) break;
         this.state.addChatMessage({
-          ...newMsg,
+          id: newMsg.id,
           text: newMsg.message,
           sender_id: newMsg.sender_id,
           sender_name: newMsg.sender_name,
-          timestamp: new Date(newMsg.timestamp).getTime()
+          timestamp: new Date(newMsg.timestamp).getTime(),
+          target: newMsg.target
         });
         this.events.onChatMessage?.(msg);
         break;
       }
       case "SCREEN_SHARE_START": {
-        this.events.onScreenShareStarted?.(
-          msg.sender,
-          this.state.getStreamById(msg.sender)
-        );
+        const peerId2 = msg.sender;
+        const stream = this.state.getParticipant(peerId2)?.media?.stream;
+        this.events.onScreenShareStarted?.(msg.sender, stream);
         break;
       }
       case "SCREEN_SHARE_STOP": {
@@ -168,18 +259,29 @@ var VideoSDKCore = class {
   }
   // ---------------- PEER ----------------
   createPeer(id) {
-    if (!this.localStream) {
-      throw new Error("No local stream");
-    }
+    if (!this.localStream) throw new Error("No local stream");
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    });
-    this.localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, this.localStream);
+      iceServers: [
+        {
+          urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302"
+          ]
+        }
+      ]
     });
     pc.ontrack = (e) => {
-      this.state.setStream(id, e.streams[0]);
-      this.events.onTrack?.(e.streams[0], id);
+      const participant = this.state.getParticipant(id);
+      if (!participant) return;
+      const media = this.getOrCreateParticipantMedia(id);
+      if (!media) return;
+      const stream = media.stream ?? new MediaStream();
+      media.stream = stream;
+      stream.addTrack(e.track);
+      media.cameraTrack = stream.getVideoTracks()[0] ?? media.cameraTrack;
+      media.isScreenSharing = stream.getVideoTracks()[0]?.label.includes("screen") ?? media.isScreenSharing;
+      this.state.notify();
+      this.events.onTrack?.(stream, id, id);
     };
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
@@ -190,6 +292,17 @@ var VideoSDKCore = class {
         target: id
       });
     };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") {
+        try {
+          pc.restartIce();
+        } catch {
+        }
+      }
+    };
+    this.localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, this.localStream);
+    });
     return pc;
   }
   // ---------------- OFFER ----------------
@@ -222,8 +335,18 @@ var VideoSDKCore = class {
       type: "offer",
       sdp
     });
+    const pending = this.pendingIceCandidates[id] || [];
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (err) {
+        console.warn(err);
+      }
+    }
+    delete this.pendingIceCandidates[id];
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    await this.flushIce(id, pc);
     this.send({
       type: "ANSWER",
       payload: answer.sdp,
@@ -233,10 +356,15 @@ var VideoSDKCore = class {
   }
   // ---------------- CLEANUP ----------------
   closePeer(id) {
-    this.peers[id]?.close();
+    const pc = this.peers[id];
+    if (!pc) return;
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+    pc.close();
     delete this.peers[id];
     this.initiators.delete(id);
-    this.state.removeStream(id);
+    this.state.notify();
   }
   async startScreenShare() {
     this.screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -244,7 +372,13 @@ var VideoSDKCore = class {
       audio: true
     });
     this.isScreenSharing = true;
+    if (this.state.localParticipant?.media) {
+      this.state.localParticipant.media.isScreenSharing = true;
+    }
     const videoTrack = this.screenStream.getVideoTracks()[0];
+    videoTrack.onended = () => {
+      this.stopScreenShare();
+    };
     Object.values(this.peers).forEach((pc) => {
       const sender = pc.getSenders().find((s) => s.track?.kind === "video");
       sender?.replaceTrack(videoTrack);
@@ -261,6 +395,9 @@ var VideoSDKCore = class {
     this.screenStream.getTracks().forEach((t) => t.stop());
     this.screenStream = null;
     this.isScreenSharing = false;
+    if (this.state.localParticipant?.media) {
+      this.state.localParticipant.media.isScreenSharing = false;
+    }
     const cameraTrack = this.localStream?.getVideoTracks()[0];
     Object.values(this.peers).forEach((pc) => {
       const sender = pc.getSenders().find((s) => s.track?.kind === "video");
@@ -292,7 +429,7 @@ var VideoSDKCore = class {
       text: payload.message.trim(),
       timestamp: Date.now(),
       reply_to: payload.reply_to ?? null,
-      target: isPrivate ? payload?.reply_to?.id ?? null : null
+      target: payload.target ?? null
     };
     this.state.addChatMessage(msg);
     this.send({
@@ -321,83 +458,35 @@ var VideoSDKCore = class {
     }
     this.roomId = null;
     this.state.participants.clear();
-    this.state.streams.clear();
     this.state.clearChat();
   }
-  // ---------------- SEND ----------------
+  async flushIce(id, pc) {
+    const pending = this.pendingIceCandidates[id];
+    if (!pending?.length) return;
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn("ICE flush error", e);
+      }
+    }
+    delete this.pendingIceCandidates[id];
+  }
+  getOrCreateParticipantMedia(id) {
+    const p = this.state.getParticipant(id);
+    if (!p) return null;
+    if (!p.media) {
+      p.media = {
+        stream: new MediaStream(),
+        micEnabled: true,
+        camEnabled: true,
+        isScreenSharing: false
+      };
+    }
+    return p.media;
+  }
   send(msg) {
     this.ws?.send(JSON.stringify(msg));
-  }
-};
-
-// src/core/MeetingState.ts
-var MeetingState = class {
-  constructor() {
-    this.participants = /* @__PURE__ */ new Map();
-    this.streams = /* @__PURE__ */ new Map();
-    this.localParticipant = null;
-    this.localStream = null;
-    this.listeners = /* @__PURE__ */ new Set();
-    this.chatMessages = /* @__PURE__ */ new Map();
-  }
-  // ---- reactive system ----
-  subscribe(fn) {
-    this.listeners.add(fn);
-    return () => {
-      this.listeners.delete(fn);
-    };
-  }
-  notify() {
-    this.listeners.forEach((fn) => fn());
-  }
-  // ---- participants ----
-  addParticipant(p) {
-    if (this.participants.has(p.id)) return false;
-    this.participants.set(p.id, p);
-    this.notify();
-    return true;
-  }
-  removeParticipant(id) {
-    this.participants.delete(id);
-    this.streams.delete(id);
-    this.notify();
-  }
-  // ---- streams ----
-  setStream(id, stream) {
-    this.streams.set(id, stream);
-    this.notify();
-  }
-  getStreamById(id) {
-    return this.streams.get(id);
-  }
-  removeStream(id) {
-    this.streams.delete(id);
-    this.notify();
-  }
-  addChatMessage(msg) {
-    this.chatMessages.set(msg.id, msg);
-    this.notify();
-  }
-  getChatMessages() {
-    return Array.from(this.chatMessages.values()).sort(
-      (a, b) => a.timestamp - b.timestamp
-    );
-  }
-  clearChat() {
-    this.chatMessages.clear();
-    this.notify();
-  }
-  // ---- helpers ----
-  getParticipants() {
-    return Array.from(this.participants.values());
-  }
-  reset() {
-    this.participants.clear();
-    this.streams.clear();
-    this.localParticipant = null;
-    this.localStream = null;
-    this.chatMessages.clear();
-    this.notify();
   }
 };
 
@@ -473,40 +562,29 @@ var useParticipants = () => {
   return participants;
 };
 
-// src/react/useStreams.ts
-import { useEffect as useEffect3, useState as useState3 } from "react";
-var useStreams = () => {
-  const { state } = useMeetingContext();
-  const [streams, setStreams] = useState3(/* @__PURE__ */ new Map());
-  useEffect3(() => {
-    setStreams(new Map(state.streams));
-    const unsub = state.subscribe(() => {
-      setStreams(new Map(state.streams));
-    });
-    return () => unsub();
-  }, [state]);
-  return streams;
-};
-
 // src/react/useRemoteVideo.ts
-import { useEffect as useEffect4, useRef } from "react";
+import { useCallback, useRef } from "react";
 var useRemoteVideo = (participantId) => {
-  const ref = useRef(null);
   const { state } = useMeetingContext();
-  useEffect4(() => {
-    const attach = () => {
-      const stream = state.getStreamById(participantId);
-      if (stream && ref.current) {
-        ref.current.srcObject = stream;
-      }
-    };
-    attach();
-    const unsub = state.subscribe(() => {
-      attach();
-    });
-    return () => unsub();
-  }, [participantId, state]);
-  return ref;
+  const lastStreamRef = useRef(null);
+  const videoRef = useCallback(
+    (video) => {
+      if (!video) return;
+      const participant = state.getParticipant(participantId);
+      const stream = participant?.media?.stream;
+      if (!stream) return;
+      if (lastStreamRef.current === stream) return;
+      lastStreamRef.current = stream;
+      video.srcObject = stream;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.play().catch((err) => {
+        console.warn(`Autoplay failed for ${participantId}`, err);
+      });
+    },
+    [participantId, state]
+  );
+  return videoRef;
 };
 
 // src/react/useLocalStream.ts
@@ -522,7 +600,6 @@ export {
   useMeeting,
   useMeetingContext,
   useParticipants,
-  useRemoteVideo,
-  useStreams
+  useRemoteVideo
 };
 //# sourceMappingURL=index.mjs.map

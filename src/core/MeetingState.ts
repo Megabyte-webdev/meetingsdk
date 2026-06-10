@@ -2,7 +2,6 @@ import { ChatMessage, Listener, Participant } from "../types/meeting";
 
 export class MeetingState {
   participants = new Map<string, Participant>();
-  streams = new Map<string, MediaStream>();
 
   localParticipant: Participant | null = null;
   localStream: MediaStream | null = null;
@@ -20,7 +19,7 @@ export class MeetingState {
     };
   }
 
-  private notify() {
+  notify() {
     this.listeners.forEach((fn) => fn());
   }
 
@@ -34,21 +33,6 @@ export class MeetingState {
 
   removeParticipant(id: string) {
     this.participants.delete(id);
-    this.streams.delete(id);
-    this.notify();
-  }
-
-  // ---- streams ----
-  setStream(id: string, stream: MediaStream) {
-    this.streams.set(id, stream);
-    this.notify();
-  }
-  getStreamById(id: string) {
-    return this.streams.get(id);
-  }
-
-  removeStream(id: string) {
-    this.streams.delete(id);
     this.notify();
   }
 
@@ -72,13 +56,15 @@ export class MeetingState {
   getParticipants() {
     return Array.from(this.participants.values());
   }
+  getParticipant(id: string) {
+    return this.participants.get(id) || null;
+  }
 
-  reset() {
+  resetRemoteState() {
     this.participants.clear();
-    this.streams.clear();
-    this.localParticipant = null;
-    this.localStream = null;
+
     this.chatMessages.clear();
+
     this.notify();
   }
 }

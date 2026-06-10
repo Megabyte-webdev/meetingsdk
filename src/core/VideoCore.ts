@@ -13,12 +13,20 @@ export class VideoSDKCore {
   private screenStream: MediaStream | null = null;
   private isScreenSharing = false;
   private pingInterval: any = null;
+  private pendingIceCandidates: Record<string, RTCIceCandidateInit[]> = {};
+  private reconnectAttempts = 0;
+  private reconnectTimer?: number;
+  private participantName = "";
+  public readonly state: MeetingState;
 
   constructor(
-    private state: MeetingState,
     private events: Events = {},
     private url: string = SDK_CONFIG.wsUrl,
   ) {
+    this.state = new MeetingState();
+    this.events = events;
+    this.url = url;
+
     this.myId = localStorage.getItem("vsdk_id") || crypto.randomUUID();
 
     localStorage.setItem("vsdk_id", this.myId);
@@ -26,6 +34,7 @@ export class VideoSDKCore {
 
   // ---------------- STREAM ----------------
   async initLocal(video: HTMLVideoElement, name: string) {
+    this.participantName = name;
     this.localStream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true,
@@ -37,8 +46,7 @@ export class VideoSDKCore {
       id: this.myId,
       name,
       media: {
-        cameraStream: this.localStream,
-        screenStream: null,
+        stream: this.localStream,
         micEnabled: true,
         camEnabled: true,
         isScreenSharing: false,
@@ -76,13 +84,34 @@ export class VideoSDKCore {
       };
 
       this.ws.onclose = (e) => {
-        console.error("WebSocket Closed:", e.code, e.reason, e.wasClean);
+        console.error("WebSocket Closed", e.code, e.reason);
+
+        this.scheduleReconnect();
       };
 
       this.ws.onmessage = async (e) => {
         await this.handle(JSON.parse(e.data));
       };
     });
+  }
+
+  private scheduleReconnect() {
+    if (!this.roomId) return;
+
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+
+    clearTimeout(this.reconnectTimer);
+
+    this.reconnectTimer = window.setTimeout(async () => {
+      try {
+        await this.connect(this.roomId!, this.participantName);
+
+        this.reconnectAttempts = 0;
+      } catch {
+        this.reconnectAttempts++;
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
 
   private startHeartbeat() {
@@ -109,8 +138,10 @@ export class VideoSDKCore {
     Object.values(this.peers).forEach((pc) => pc.close());
 
     this.peers = {};
+    this.initiators.clear();
+    this.pendingIceCandidates = {};
 
-    this.state.reset();
+    this.state.resetRemoteState();
   }
 
   // ---------------- HANDLE SIGNALS ----------------
@@ -164,15 +195,31 @@ export class VideoSDKCore {
         break;
       }
 
-      case "ICE":
+      case "ICE": {
+        const candidate = JSON.parse(msg.payload);
+
+        let pc = this.peers[msg.sender];
+
+        if (!pc) {
+          this.pendingIceCandidates[msg.sender] ??= [];
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
+        }
+
+        if (!pc.remoteDescription) {
+          this.pendingIceCandidates[msg.sender] ??= [];
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
+        }
+
         try {
-          await this.peers[msg.sender]?.addIceCandidate(
-            JSON.parse(msg.payload),
-          );
+          await pc.addIceCandidate(candidate);
         } catch (err) {
           console.warn("ICE error:", err);
         }
+
         break;
+      }
 
       case "USER_LEFT":
         const peerId = msg.participant.id;
@@ -188,21 +235,21 @@ export class VideoSDKCore {
 
         if (newMsg.sender_id === this.myId) break; // already added optimistically
         this.state.addChatMessage({
-          ...newMsg,
+          id: newMsg.id,
           text: newMsg.message,
           sender_id: newMsg.sender_id,
           sender_name: newMsg.sender_name,
           timestamp: new Date(newMsg.timestamp).getTime(),
+          target: newMsg.target,
         });
 
         this.events.onChatMessage?.(msg);
         break;
       }
       case "SCREEN_SHARE_START": {
-        this.events.onScreenShareStarted?.(
-          msg.sender,
-          this.state.getStreamById(msg.sender)!,
-        );
+        const peerId = msg.sender;
+        const stream = this.state.getParticipant(peerId)?.media?.stream;
+        this.events.onScreenShareStarted?.(msg.sender, stream!);
         break;
       }
 
@@ -215,22 +262,39 @@ export class VideoSDKCore {
 
   // ---------------- PEER ----------------
   private createPeer(id: string) {
-    if (!this.localStream) {
-      throw new Error("No local stream");
-    }
+    if (!this.localStream) throw new Error("No local stream");
 
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-
-    this.localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, this.localStream!);
+      iceServers: [
+        {
+          urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+          ],
+        },
+      ],
     });
 
     pc.ontrack = (e) => {
-      this.state.setStream(id, e.streams[0]);
+      const participant = this.state.getParticipant(id);
+      if (!participant) return;
 
-      this.events.onTrack?.(e.streams[0], id);
+      const media = this.getOrCreateParticipantMedia(id);
+      if (!media) return;
+
+      const stream = media.stream ?? new MediaStream();
+      media.stream = stream;
+
+      stream.addTrack(e.track);
+
+      media.cameraTrack = stream.getVideoTracks()[0] ?? media.cameraTrack;
+      media.isScreenSharing =
+        stream.getVideoTracks()[0]?.label.includes("screen") ??
+        media.isScreenSharing;
+
+      this.state.notify();
+
+      this.events.onTrack?.(stream, id, id);
     };
 
     pc.onicecandidate = (e) => {
@@ -243,6 +307,19 @@ export class VideoSDKCore {
         target: id,
       });
     };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") {
+        try {
+          pc.restartIce();
+        } catch {}
+      }
+    };
+
+    //  IMPORTANT: attach tracks AFTER setup (safe timing)
+    this.localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, this.localStream!);
+    });
 
     return pc;
   }
@@ -288,9 +365,22 @@ export class VideoSDKCore {
       sdp,
     });
 
+    const pending = this.pendingIceCandidates[id] || [];
+
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (err) {
+        console.warn(err);
+      }
+    }
+
+    delete this.pendingIceCandidates[id];
+
     const answer = await pc.createAnswer();
 
     await pc.setLocalDescription(answer);
+    await this.flushIce(id, pc);
 
     this.send({
       type: "ANSWER",
@@ -302,13 +392,21 @@ export class VideoSDKCore {
 
   // ---------------- CLEANUP ----------------
   private closePeer(id: string) {
-    this.peers[id]?.close();
+    const pc = this.peers[id];
+
+    if (!pc) return;
+
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+
+    pc.close();
 
     delete this.peers[id];
 
     this.initiators.delete(id);
 
-    this.state.removeStream(id);
+    this.state.notify();
   }
 
   async startScreenShare() {
@@ -318,9 +416,15 @@ export class VideoSDKCore {
     });
 
     this.isScreenSharing = true;
+    if (this.state.localParticipant?.media) {
+      this.state.localParticipant.media.isScreenSharing = true;
+    }
 
     // Replace video track in all peer connections
     const videoTrack = this.screenStream.getVideoTracks()[0];
+    videoTrack.onended = () => {
+      this.stopScreenShare();
+    };
 
     Object.values(this.peers).forEach((pc) => {
       const sender = pc.getSenders().find((s) => s.track?.kind === "video");
@@ -345,6 +449,9 @@ export class VideoSDKCore {
 
     this.screenStream = null;
     this.isScreenSharing = false;
+    if (this.state.localParticipant?.media) {
+      this.state.localParticipant.media.isScreenSharing = false;
+    }
 
     // restore camera
     const cameraTrack = this.localStream?.getVideoTracks()[0];
@@ -386,7 +493,7 @@ export class VideoSDKCore {
       text: payload.message.trim(),
       timestamp: Date.now(),
       reply_to: payload.reply_to ?? null,
-      target: isPrivate ? (payload?.reply_to?.id ?? null) : null,
+      target: payload.target ?? null,
     };
 
     // optimistic UI update
@@ -428,11 +535,39 @@ export class VideoSDKCore {
     // Reset state
     this.roomId = null;
     this.state.participants.clear();
-    this.state.streams.clear();
     this.state.clearChat();
   }
 
-  // ---------------- SEND ----------------
+  private async flushIce(id: string, pc: RTCPeerConnection) {
+    const pending = this.pendingIceCandidates[id];
+    if (!pending?.length) return;
+
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn("ICE flush error", e);
+      }
+    }
+
+    delete this.pendingIceCandidates[id];
+  }
+  private getOrCreateParticipantMedia(id: string) {
+    const p = this.state.getParticipant(id);
+    if (!p) return null;
+
+    if (!p.media) {
+      p.media = {
+        stream: new MediaStream(),
+        micEnabled: true,
+        camEnabled: true,
+        isScreenSharing: false,
+      };
+    }
+
+    return p.media;
+  }
+
   private send(msg: any) {
     this.ws?.send(JSON.stringify(msg));
   }

@@ -1,9 +1,8 @@
 import * as react_jsx_runtime from 'react/jsx-runtime';
-import * as React from 'react';
-import React__default from 'react';
+import React from 'react';
 
 type Events = {
-    onTrack?: (stream: MediaStream, peerId: string) => void;
+    onTrack?: (stream: MediaStream, peerId: string, id: string) => void;
     onUserJoined?: (p: Participant) => void;
     onUserLeft?: (id: string) => void;
     onChatMessage?: (msg: ChatMessage) => void;
@@ -34,8 +33,9 @@ type ChatInput = {
     target?: string | null;
 };
 type ParticipantMedia = {
-    cameraStream: MediaStream | null;
-    screenStream: MediaStream | null;
+    stream?: MediaStream | null;
+    cameraTrack?: MediaStreamTrack;
+    screenTrack?: MediaStreamTrack;
     micEnabled: boolean;
     camEnabled: boolean;
     isScreenSharing: boolean;
@@ -43,27 +43,23 @@ type ParticipantMedia = {
 
 declare class MeetingState {
     participants: Map<string, Participant>;
-    streams: Map<string, MediaStream>;
     localParticipant: Participant | null;
     localStream: MediaStream | null;
     private listeners;
     chatMessages: Map<string, ChatMessage>;
     subscribe(fn: Listener): () => void;
-    private notify;
+    notify(): void;
     addParticipant(p: Participant): boolean;
     removeParticipant(id: string): void;
-    setStream(id: string, stream: MediaStream): void;
-    getStreamById(id: string): MediaStream | undefined;
-    removeStream(id: string): void;
     addChatMessage(msg: ChatMessage): void;
     getChatMessages(): ChatMessage[];
     clearChat(): void;
     getParticipants(): Participant[];
-    reset(): void;
+    getParticipant(id: string): Participant | null;
+    resetRemoteState(): void;
 }
 
 declare class VideoSDKCore {
-    private state;
     private events;
     private url;
     private ws;
@@ -75,9 +71,15 @@ declare class VideoSDKCore {
     private screenStream;
     private isScreenSharing;
     private pingInterval;
-    constructor(state: MeetingState, events?: Events, url?: string);
+    private pendingIceCandidates;
+    private reconnectAttempts;
+    private reconnectTimer?;
+    private participantName;
+    readonly state: MeetingState;
+    constructor(events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
     connect(roomId: string, name: string): Promise<void>;
+    private scheduleReconnect;
     private startHeartbeat;
     private stopHeartbeat;
     private reset;
@@ -90,6 +92,8 @@ declare class VideoSDKCore {
     stopScreenShare(): void;
     sendChatMessage(payload: ChatInput): void;
     disconnect(): void;
+    private flushIce;
+    private getOrCreateParticipantMedia;
     private send;
 }
 
@@ -100,7 +104,7 @@ type MeetingContextType = {
 };
 declare const MeetingProvider: ({ core, children, }: {
     core: VideoSDKCore;
-    children: React__default.ReactNode;
+    children: React.ReactNode;
 }) => react_jsx_runtime.JSX.Element;
 declare const useMeetingContext: () => MeetingContextType;
 
@@ -118,10 +122,8 @@ declare const useMeeting: () => {
 
 declare const useParticipants: () => Participant[];
 
-declare const useStreams: () => Map<string, MediaStream>;
-
-declare const useRemoteVideo: (participantId: string) => React.RefObject<HTMLVideoElement | null>;
+declare const useRemoteVideo: (participantId: string) => (video: HTMLVideoElement | null) => void;
 
 declare const useLocalStream: () => MediaStream | null;
 
-export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalStream, useMeeting, useMeetingContext, useParticipants, useRemoteVideo, useStreams };
+export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalStream, useMeeting, useMeetingContext, useParticipants, useRemoteVideo };
