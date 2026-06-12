@@ -948,68 +948,39 @@ var useParticipants = () => {
 };
 
 // src/react/useRemoteMedia.ts
-import { useCallback as useCallback2, useEffect as useEffect5, useState as useState4 } from "react";
+import { useEffect as useEffect5, useRef as useRef3, useState as useState4 } from "react";
 var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
-  const [participant, setParticipant] = useState4(() => {
-    return sdk.state.getParticipant(participantId) || null;
-  });
+  const videoRef = useRef3(null);
+  const audioRef = useRef3(null);
+  const [participant, setParticipant] = useState4(
+    () => sdk.state.getParticipant(participantId) || null
+  );
   useEffect5(() => {
-    return sdk.state.subscribe(`participant:${participantId}`, () => {
+    const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
       const updated = sdk.state.getParticipant(participantId);
-      if (updated) setParticipant({ ...updated });
+      if (updated) {
+        setParticipant({ ...updated });
+      }
     });
+    return unsub;
   }, [participantId, sdk]);
-  const stream = participant?.media?.stream;
-  const videoTrack = participant?.media?.cameraTrack;
-  const audioTrack = participant?.media?.audioTrack;
-  const isCamActive = !!participant?.media?.camEnabled;
-  const isMicEnabled = !!participant?.media?.micEnabled;
-  const videoRef = useCallback2(
-    (el) => {
-      if (!el) return;
-      let streamToUse = null;
-      if (videoTrack && videoTrack.kind === "video") {
-        if (videoTrack.readyState === "live") {
-          streamToUse = new MediaStream([videoTrack]);
-        }
-      } else if (stream instanceof MediaStream) {
-        streamToUse = stream;
+  useEffect5(() => {
+    const stream = participant?.media?.stream;
+    if (stream) {
+      if (videoRef.current && videoRef.current.srcObject !== stream) {
+        videoRef.current.srcObject = stream;
       }
-      if (!streamToUse) return;
-      if (el.srcObject !== streamToUse) {
-        el.srcObject = streamToUse;
+      if (audioRef.current && audioRef.current.srcObject !== stream) {
+        audioRef.current.srcObject = stream;
       }
-      el.play().catch(() => {
-      });
-    },
-    [stream, videoTrack]
-  );
-  const audioRef = useCallback2(
-    (el) => {
-      if (!el) return;
-      let audioStream = null;
-      if (audioTrack && audioTrack.kind === "audio") {
-        if (audioTrack.readyState === "live") {
-          audioStream = new MediaStream([audioTrack]);
-        }
-      } else if (stream instanceof MediaStream) {
-        audioStream = stream;
-      }
-      if (!audioStream) return;
-      if (el.srcObject !== audioStream) {
-        el.srcObject = audioStream;
-      }
-      el.play().catch(() => {
-      });
-    },
-    [stream, audioTrack]
-  );
+    }
+  }, [participant?.media?.stream]);
   return {
     videoRef,
     audioRef,
-    isCamActive,
-    isMicEnabled
+    isCamActive: !!participant?.media?.camEnabled,
+    isMicEnabled: !!participant?.media?.micEnabled
   };
 };
 export {

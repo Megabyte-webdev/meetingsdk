@@ -1,5 +1,6 @@
 import * as react_jsx_runtime from 'react/jsx-runtime';
-import React from 'react';
+import * as react from 'react';
+import react__default from 'react';
 
 type Events = {
     onMicToggled?: (peerId: string, enabled: boolean) => void;
@@ -170,7 +171,7 @@ type MeetingContextValue = {
 };
 declare const MeetingProvider: ({ config, children, }: {
     config: MeetingConfig;
-    children: React.ReactNode;
+    children: react__default.ReactNode;
 }) => react_jsx_runtime.JSX.Element;
 declare const useMeetingContext: () => MeetingContextValue;
 
@@ -200,8 +201,8 @@ declare const useMeeting: (handlers?: {
 declare const useParticipants: () => Participant[];
 
 declare const useRemoteMedia: (participantId: string) => {
-    videoRef: (el: HTMLVideoElement | null) => void;
-    audioRef: (el: HTMLAudioElement | null) => void;
+    videoRef: react.RefObject<HTMLVideoElement | null>;
+    audioRef: react.RefObject<HTMLAudioElement | null>;
     isCamActive: boolean;
     isMicEnabled: boolean;
 };
