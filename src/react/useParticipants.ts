@@ -3,18 +3,23 @@ import { useMeetingContext } from "./MeetingProvider";
 import { Participant } from "../types/meeting";
 
 export const useParticipants = () => {
-  const { state } = useMeetingContext();
-  const [participants, setParticipants] = useState<Participant[]>([]);
+  const { sdk } = useMeetingContext();
+
+  const [participants, setParticipants] = useState<Participant[]>(() =>
+    sdk.state.getParticipants(),
+  );
 
   useEffect(() => {
-    setParticipants(state.getParticipants());
+    const update = () => {
+      setParticipants(sdk.state.getParticipants());
+    };
 
-    const unsub = state.subscribe(() => {
-      setParticipants(state.getParticipants());
-    });
+    update();
 
-    return () => unsub();
-  }, [state]);
+    const unsub = sdk.state.subscribe("participants", update);
+
+    return unsub;
+  }, [sdk]);
 
   return participants;
 };

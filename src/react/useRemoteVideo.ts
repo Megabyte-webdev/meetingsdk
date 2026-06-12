@@ -1,35 +1,79 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMeetingContext } from "./MeetingProvider";
+import { Participant } from "../types/meeting";
 
 export const useRemoteVideo = (participantId: string) => {
-  const { state } = useMeetingContext();
+  const { sdk } = useMeetingContext();
 
-  const lastStreamRef = useRef<MediaStream | null>(null);
+  const [participant, setParticipant] = useState<Participant | null>(() => {
+    return sdk.state.getParticipant(participantId) || null;
+  });
 
-  const videoRef = useCallback(
-    (video: HTMLVideoElement | null) => {
-      if (!video) return;
+  useEffect(() => {
+    const unsubscribe = sdk.state.subscribe(
+      `participant:${participantId}`,
+      () => {
+        const updated = sdk.state.getParticipant(participantId);
+        if (updated) {
+          setParticipant({ ...updated });
+        }
+      },
+    );
+    return unsubscribe;
+  }, [participantId, sdk]);
 
-      const participant = state.getParticipant(participantId);
-      const stream = participant?.media?.stream;
+  const streamSource = participant?.media?.stream;
+  const trackSource = participant?.media?.cameraTrack;
 
-      if (!stream) return;
-
-      // Avoid reassigning same stream
-      if (lastStreamRef.current === stream) return;
-
-      lastStreamRef.current = stream;
-
-      video.srcObject = stream;
-      video.autoplay = true;
-      video.playsInline = true;
-
-      video.play().catch((err) => {
-        console.warn(`Autoplay failed for ${participantId}`, err);
-      });
-    },
-    [participantId, state],
+  // SAFE VALIDATION: Duck-type check properties on the prototype chain (.id / .kind)
+  const hasValidVideoSource = !!(
+    (streamSource &&
+      (streamSource.id || streamSource instanceof MediaStream)) ||
+    (trackSource &&
+      (trackSource.id ||
+        trackSource.kind ||
+        trackSource instanceof MediaStreamTrack))
   );
 
-  return videoRef;
+  const isCamActive = !!(participant?.media?.camEnabled && hasValidVideoSource);
+  const isMicEnabled = !!participant?.media?.micEnabled;
+
+  const lastSourceRef = useRef<any>(null);
+
+  const videoRef = useCallback(
+    (videoEl: HTMLVideoElement | null) => {
+      if (!videoEl || !isCamActive) return;
+
+      const currentSource = streamSource?.id ? streamSource : trackSource;
+      if (lastSourceRef.current === currentSource) return;
+      lastSourceRef.current = currentSource;
+
+      if (streamSource && streamSource.id) {
+        if (videoEl.srcObject !== streamSource) {
+          videoEl.srcObject = streamSource;
+        }
+      } else if (trackSource && trackSource.kind === "video") {
+        const currentStream = videoEl.srcObject as MediaStream | null;
+        const currentTrack = currentStream?.getVideoTracks()[0];
+
+        if (!currentTrack || currentTrack.id !== trackSource.id) {
+          try {
+            videoEl.srcObject = new MediaStream([trackSource]);
+          } catch (err) {
+            console.error(
+              "Seamless WebRTC track fallback binding failed:",
+              err,
+            );
+          }
+        }
+      }
+
+      videoEl.play().catch((err) => {
+        console.warn(`Autoplay interrupted for peer ${participantId}:`, err);
+      });
+    },
+    [streamSource, trackSource, isCamActive, participantId],
+  );
+
+  return { videoRef, isCamActive, isMicEnabled };
 };

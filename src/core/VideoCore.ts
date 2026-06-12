@@ -1,5 +1,11 @@
 import { SDK_CONFIG } from "../config/ws";
-import { ChatInput, ChatMessage, Events } from "../types/meeting";
+import {
+  ChatInput,
+  ChatMessage,
+  Events,
+  MeetingConfig,
+  SDKError,
+} from "../types/meeting";
 import { MeetingState } from "./MeetingState";
 
 export class VideoSDKCore {
@@ -12,12 +18,38 @@ export class VideoSDKCore {
   private localStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
   private isScreenSharing = false;
+  private screenSenders: Record<string, RTCRtpSender[]> = {};
+
   private pingInterval: any = null;
   private pendingIceCandidates: Record<string, RTCIceCandidateInit[]> = {};
   private reconnectAttempts = 0;
   private reconnectTimer?: number;
   private participantName = "";
   public readonly state: MeetingState;
+  private joinResolver?: () => void;
+  private joinRejecter?: (e: any) => void;
+  private emitError(
+    code: string,
+    message: string,
+    raw?: any,
+    recoverable = true,
+  ) {
+    const err: SDKError = {
+      code,
+      message,
+      raw,
+      roomId: this.roomId,
+      userId: this.myId,
+      recoverable,
+    };
+
+    this.events.onError?.(err);
+
+    this.joinRejecter?.(err);
+    this.joinRejecter = undefined;
+
+    console.error("[MeetingSDK Error]", err);
+  }
 
   constructor(
     private events: Events = {},
@@ -35,23 +67,27 @@ export class VideoSDKCore {
   // ---------------- STREAM ----------------
   async initLocal(video: HTMLVideoElement, name: string) {
     this.participantName = name;
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
+
+    if (!this.localStream) {
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+    }
 
     video.srcObject = this.localStream;
 
-    this.state.localParticipant = {
+    // Fix: Supply mandatory fields to satisfy the Participant type constraint
+    this.state.updateLocalParticipant({
       id: this.myId,
-      name,
+      name: this.participantName,
       media: {
         stream: this.localStream,
         micEnabled: true,
         camEnabled: true,
         isScreenSharing: false,
       },
-    };
+    });
 
     this.state.localStream = this.localStream;
   }
@@ -63,6 +99,8 @@ export class VideoSDKCore {
     this.reset();
 
     return new Promise<void>((resolve, reject) => {
+      this.joinResolver = resolve;
+      this.joinRejecter = reject;
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
@@ -72,19 +110,28 @@ export class VideoSDKCore {
           user_id: this.myId,
           sender_name: name,
         });
-
-        this.startHeartbeat();
-
-        resolve();
       };
 
       this.ws.onerror = (err) => {
-        console.error("WebSocket Error:", err);
-        reject(new Error("WebSocket connection failed"));
+        this.emitError("WS_ERROR", "WebSocket encountered an error", err, true);
       };
 
       this.ws.onclose = (e) => {
-        console.error("WebSocket Closed", e.code, e.reason);
+        this.emitError(
+          "WS_CLOSED",
+          `Connection closed (${e.code}) ${e.reason || ""}`,
+          e,
+          true,
+        );
+
+        // If join never resolved, fail the promise
+        this.joinRejecter?.({
+          code: "WS_CLOSED",
+          message: "Connection closed before join completed",
+          raw: e,
+        });
+
+        this.joinRejecter = undefined;
 
         this.scheduleReconnect();
       };
@@ -92,6 +139,111 @@ export class VideoSDKCore {
       this.ws.onmessage = async (e) => {
         await this.handle(JSON.parse(e.data));
       };
+    });
+  }
+
+  async joinMeeting(config: MeetingConfig) {
+    const { roomId, name, audioMuted = false, videoMuted = false } = config;
+
+    if (!roomId || !name) {
+      throw new Error("roomId and name are required to join meeting");
+    }
+
+    this.participantName = name;
+
+    // Reuse existing stream if initLocal already configured it
+    if (!this.localStream) {
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+    }
+
+    this.localStream.getAudioTracks().forEach((t) => {
+      t.enabled = !audioMuted;
+    });
+    this.localStream.getVideoTracks().forEach((t) => {
+      t.enabled = !videoMuted;
+    });
+
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        stream: this.localStream,
+        micEnabled: !audioMuted,
+        camEnabled: !videoMuted,
+        isScreenSharing: false,
+      },
+    });
+
+    this.state.localStream = this.localStream;
+
+    await this.connect(roomId, name);
+  }
+
+  /** Expose the roomId without making it fully public */
+  getMeetingId(): string | null {
+    return this.roomId;
+  }
+
+  toggleMic() {
+    const mediaState = this.state.localParticipant?.media;
+    if (!mediaState) return;
+
+    // Flip the state tracked in localParticipant.media
+    const nextEnabled = !mediaState.micEnabled;
+
+    // Mirror the state change down to the actual hardware tracks
+    this.localStream
+      ?.getAudioTracks()
+      .forEach((t) => (t.enabled = nextEnabled));
+
+    // Update state layer
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        ...mediaState,
+        micEnabled: nextEnabled,
+      },
+    });
+
+    // Notify peers
+    this.send({
+      type: "MEDIA_STATE",
+      kind: "audio",
+      enabled: nextEnabled,
+    });
+  }
+
+  toggleCam() {
+    const mediaState = this.state.localParticipant?.media;
+    if (!mediaState) return;
+
+    // Flip the state tracked in localParticipant.media
+    const nextEnabled = !mediaState.camEnabled;
+
+    // Mirror the state change down to the actual hardware tracks
+    this.localStream
+      ?.getVideoTracks()
+      .forEach((t) => (t.enabled = nextEnabled));
+
+    // Update state layer
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        ...mediaState,
+        camEnabled: nextEnabled,
+      },
+    });
+
+    // Notify peers
+    this.send({
+      type: "MEDIA_STATE",
+      kind: "video",
+      enabled: nextEnabled,
     });
   }
 
@@ -150,17 +302,28 @@ export class VideoSDKCore {
 
     switch (msg.type) {
       case "EXISTING_USERS":
+        if (msg.presenterId) {
+          this.state.setPresenterId(msg.presenterId);
+
+          // Trigger your event so the UI knows to render the stage
+          this.events.onScreenShareStarted?.(msg.presenterId, null!);
+        }
+
         for (const p of msg.participants || []) {
           if (!p?.id || p.id === this.myId) continue;
-
           this.state.addParticipant(p);
-
           this.events.onUserJoined?.(p);
-
           await this.createOffer(p.id);
         }
         break;
 
+      case "JOINED": {
+        this.startHeartbeat();
+        this.joinResolver?.();
+        this.joinResolver = undefined;
+        this.joinRejecter = undefined;
+        break;
+      }
       case "USER_JOINED": {
         const p = msg.participant;
 
@@ -179,7 +342,6 @@ export class VideoSDKCore {
 
       case "ANSWER": {
         const pc = this.peers[msg.sender];
-
         if (!pc) return;
 
         if (pc.signalingState !== "have-local-offer") {
@@ -191,6 +353,9 @@ export class VideoSDKCore {
           type: "answer",
           sdp: msg.payload,
         });
+
+        //  CRITICAL WEBRTC FIX: Flush cached ICE paths now that remoteDescription is set!
+        await this.flushIce(msg.sender, pc);
 
         break;
       }
@@ -230,6 +395,31 @@ export class VideoSDKCore {
         this.events.onUserLeft?.(peerId);
 
         break;
+
+      case "MEDIA_STATE_CHANGE": {
+        const peerId = msg.peerId;
+        const { kind, enabled } = msg;
+
+        // 1. Sync the app state layer for UI rendering components
+        if (kind === "audio") {
+          this.state.updateParticipantMedia(peerId, { micEnabled: enabled });
+          this.events.onMicToggled?.(peerId, enabled);
+        } else if (kind === "video") {
+          this.state.updateParticipantMedia(peerId, { camEnabled: enabled });
+          this.events.onCamToggled?.(peerId, enabled);
+        }
+
+        const pc = this.peers[peerId];
+        if (pc) {
+          pc.getReceivers().forEach((receiver) => {
+            if (receiver.track && receiver.track.kind === kind) {
+              receiver.track.enabled = enabled;
+            }
+          });
+        }
+        break;
+      }
+
       case "CHAT_MESSAGE": {
         const newMsg = msg.data;
 
@@ -247,15 +437,49 @@ export class VideoSDKCore {
         break;
       }
       case "SCREEN_SHARE_START": {
-        const peerId = msg.sender;
-        const stream = this.state.getParticipant(peerId)?.media?.stream;
-        this.events.onScreenShareStarted?.(msg.sender, stream!);
+        const peerId = msg.peerId;
+
+        this.state.updateParticipantMedia(peerId, {
+          isScreenSharing: true,
+          remoteScreenStreamId: msg.stream_id,
+        });
+
+        if (!this.state.presenterId) {
+          this.state.setPresenterId(peerId);
+        }
+
+        // Fix: Use screenStream instead of the regular camera stream
+        const screenStream =
+          this.state.getParticipant(peerId)?.media?.screenStream;
+
+        this.events.onScreenShareStarted?.(peerId, screenStream || null!);
         break;
       }
 
       case "SCREEN_SHARE_STOP": {
-        this.events.onScreenShareStopped?.(msg.sender);
+        const peerId = msg.peerId;
+        this.state.updateParticipantMedia(peerId, { isScreenSharing: false });
+        if (this.state.presenterId === peerId) {
+          this.state.setPresenterId(null);
+        }
+        this.events.onScreenShareStopped?.(peerId);
         break;
+      }
+      case "ERROR": {
+        const fatal = msg?.fatal === true;
+
+        this.emitError(
+          "WS_ERROR",
+          msg?.message || "Unknown error",
+          msg,
+          !fatal,
+        );
+
+        if (fatal) {
+          this.disconnect();
+        }
+
+        return;
       }
     }
   }
@@ -275,31 +499,49 @@ export class VideoSDKCore {
       ],
     });
 
-    pc.ontrack = (e) => {
+    pc.ontrack = (event) => {
+      const incomingStream = event.streams[0];
       const participant = this.state.getParticipant(id);
-      if (!participant) return;
 
-      const media = this.getOrCreateParticipantMedia(id);
-      if (!media) return;
+      const isScreenStream =
+        incomingStream.id === participant?.media?.remoteScreenStreamId ||
+        (participant?.media?.stream &&
+          participant.media.stream.id !== incomingStream.id);
 
-      const stream = media.stream ?? new MediaStream();
-      media.stream = stream;
+      if (isScreenStream) {
+        // CRITICAL FIX: Ensure we safely grab the video track.
+        // If this specific event fired for the audio track, fallback to what's already in the stream or state.
+        const videoTrack =
+          event.track.kind === "video"
+            ? event.track
+            : incomingStream.getVideoTracks()[0] ||
+              participant?.media?.screenTrack;
 
-      stream.addTrack(e.track);
+        this.state.updateParticipantMedia(id, {
+          screenStream: incomingStream,
+          screenTrack: videoTrack,
 
-      media.cameraTrack = stream.getVideoTracks()[0] ?? media.cameraTrack;
-      media.isScreenSharing =
-        stream.getVideoTracks()[0]?.label.includes("screen") ??
-        media.isScreenSharing;
+          isScreenSharing: true,
+        });
 
-      this.state.notify();
+        // CRITICAL FIX: Late joiners never get SCREEN_SHARE_START.
+        // We must set the presenter ID here if it isn't set, otherwise the grid won't render the stage.
+        if (!this.state.presenterId) {
+          this.state.setPresenterId(id);
+        }
 
-      this.events.onTrack?.(stream, id, id);
+        this.events.onScreenShareStarted?.(id, incomingStream);
+      } else {
+        this.state.updateParticipantMedia(id, {
+          stream: incomingStream,
+          cameraTrack: incomingStream.getVideoTracks()[0],
+        });
+        this.events.onTrack?.(incomingStream, id);
+      }
     };
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-
       this.send({
         type: "ICE",
         payload: JSON.stringify(e.candidate),
@@ -316,19 +558,29 @@ export class VideoSDKCore {
       }
     };
 
-    //  IMPORTANT: attach tracks AFTER setup (safe timing)
     this.localStream.getTracks().forEach((track) => {
       pc.addTrack(track, this.localStream!);
     });
+
+    if (this.isScreenSharing && this.screenStream) {
+      this.screenSenders[id] = [];
+      this.screenStream.getTracks().forEach((track) => {
+        const sender = pc.addTrack(track, this.screenStream!);
+        this.screenSenders[id].push(sender);
+      });
+    }
 
     return pc;
   }
 
   // ---------------- OFFER ----------------
-  private async createOffer(id: string) {
-    if (this.initiators.has(id)) return;
+  private async createOffer(id: string, isRenegotiation = false) {
+    // Only apply the initial glare gate if this is not a track renegotiation
+    if (!isRenegotiation && this.initiators.has(id)) return;
 
-    this.initiators.add(id);
+    if (!isRenegotiation) {
+      this.initiators.add(id);
+    }
 
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
@@ -341,7 +593,6 @@ export class VideoSDKCore {
     }
 
     const offer = await pc.createOffer();
-
     await pc.setLocalDescription(offer);
 
     this.send({
@@ -406,37 +657,50 @@ export class VideoSDKCore {
 
     this.initiators.delete(id);
 
-    this.state.notify();
+    this.state.removeParticipant(id);
   }
 
   async startScreenShare() {
+    if (this.state.presenterId && this.state.presenterId !== this.myId) {
+      throw new Error("Another user is already sharing their screen.");
+    }
+
     this.screenStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
       audio: true,
     });
 
     this.isScreenSharing = true;
-    if (this.state.localParticipant?.media) {
-      this.state.localParticipant.media.isScreenSharing = true;
-    }
 
-    // Replace video track in all peer connections
-    const videoTrack = this.screenStream.getVideoTracks()[0];
-    videoTrack.onended = () => {
+    this.state.updateLocalParticipant({
+      media: {
+        isScreenSharing: true,
+        screenStream: this.screenStream,
+      },
+    });
+
+    this.state.setPresenterId(this.myId);
+    // Handle the user clicking browser's built-in "Stop Sharing" button
+    this.screenStream.getVideoTracks()[0].onended = () => {
       this.stopScreenShare();
     };
 
-    Object.values(this.peers).forEach((pc) => {
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+    Object.entries(this.peers).forEach(([peerId, pc]) => {
+      this.screenSenders[peerId] = [];
+      this.screenStream!.getTracks().forEach((track) => {
+        const sender = pc.addTrack(track, this.screenStream!);
+        this.screenSenders[peerId].push(sender);
+      });
 
-      sender?.replaceTrack(videoTrack);
+      // Renegotiate peer connection descriptors to notify remote side of new track footprint
+      this.createOffer(peerId, true);
     });
 
-    // notify others via signaling
     this.send({
       type: "SCREEN_SHARE_START",
       sender: this.myId,
       room_id: this.roomId,
+      stream_id: this.screenStream.id.replace(/[{}]/g, ""),
     });
 
     return this.screenStream;
@@ -447,22 +711,36 @@ export class VideoSDKCore {
 
     this.screenStream.getTracks().forEach((t) => t.stop());
 
+    // Remove tracks cleanly from WebRTC channel pathways across your peers
+    Object.entries(this.peers).forEach(([peerId, pc]) => {
+      const senders = this.screenSenders[peerId] || [];
+      senders.forEach((sender) => {
+        try {
+          pc.removeTrack(sender);
+        } catch (err) {
+          console.warn(err);
+        }
+      });
+      delete this.screenSenders[peerId];
+
+      // Renegotiate layout expectations to scale down stream bounds
+      this.createOffer(peerId, true);
+    });
+
     this.screenStream = null;
     this.isScreenSharing = false;
-    if (this.state.localParticipant?.media) {
-      this.state.localParticipant.media.isScreenSharing = false;
-    }
 
-    // restore camera
-    const cameraTrack = this.localStream?.getVideoTracks()[0];
-
-    Object.values(this.peers).forEach((pc) => {
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-
-      if (cameraTrack) {
-        sender?.replaceTrack(cameraTrack);
-      }
+    this.state.updateLocalParticipant({
+      media: {
+        isScreenSharing: false,
+        screenStream: null,
+        screenTrack: undefined,
+      },
     });
+
+    if (this.state.presenterId === this.myId) {
+      this.state.setPresenterId(null);
+    }
 
     this.send({
       type: "SCREEN_SHARE_STOP",
@@ -514,28 +792,35 @@ export class VideoSDKCore {
   }
 
   disconnect() {
-    // Close all peer connections
+    this.stopScreenShare();
+
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
     this.initiators.clear();
 
     this.stopHeartbeat();
-    // Close WebSocket
+
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
 
-    // Stop local tracks
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => track.stop());
       this.localStream = null;
     }
 
-    // Reset state
     this.roomId = null;
+
+    // Clear and notify
+    this.state.localParticipant = null;
+    this.state.notify("localParticipant");
+
     this.state.participants.clear();
+    this.state.notify("participants");
+
     this.state.clearChat();
+    this.state.setPresenterId(null);
   }
 
   private async flushIce(id: string, pc: RTCPeerConnection) {
@@ -551,21 +836,6 @@ export class VideoSDKCore {
     }
 
     delete this.pendingIceCandidates[id];
-  }
-  private getOrCreateParticipantMedia(id: string) {
-    const p = this.state.getParticipant(id);
-    if (!p) return null;
-
-    if (!p.media) {
-      p.media = {
-        stream: new MediaStream(),
-        micEnabled: true,
-        camEnabled: true,
-        isScreenSharing: false,
-      };
-    }
-
-    return p.media;
   }
 
   private send(msg: any) {

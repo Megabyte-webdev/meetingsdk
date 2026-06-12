@@ -1,24 +1,15 @@
+import { useEffect } from "react";
 import { useMeetingContext } from "./MeetingProvider";
 
-export const useMeeting = () => {
-  const { core, state } = useMeetingContext();
+export const useMeeting = (handlers?: { onError?: (err: any) => void }) => {
+  const ctx = useMeetingContext();
 
-  return {
-    join: core.connect.bind(core),
-    startLocalStream: core.initLocal.bind(core),
-    leave: core.disconnect.bind(core),
+  useEffect(() => {
+    if (!handlers?.onError) return;
 
-    meetingId: (core as any).roomId,
+    const unsubscribe = ctx.onError(handlers.onError);
+    return unsubscribe;
+  }, [handlers?.onError]);
 
-    localParticipant: state.localParticipant,
-    usePubSub(type: "SECURE_CHAT") {
-      if (type !== "SECURE_CHAT")
-        throw new Error("Only 'SECURE_CHAT' pubsub is supported for now");
-
-      return {
-        messages: state.chatMessages,
-        publish: core.sendChatMessage.bind(core),
-      };
-    },
-  };
+  return ctx;
 };

@@ -1,3 +1,5 @@
+export { useLocalParticipant } from "./react/useLocalParticipant";
+
 // Core exports
 export { VideoSDKCore } from "./core/VideoCore";
 export { MeetingState } from "./core/MeetingState";
@@ -8,4 +10,3 @@ export { MeetingProvider, useMeetingContext } from "./react/MeetingProvider";
 export { useMeeting } from "./react/useMeeting";
 export { useParticipants } from "./react/useParticipants";
 export { useRemoteVideo } from "./react/useRemoteVideo";
-export { useLocalStream } from "./react/useLocalStream";

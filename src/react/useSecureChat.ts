@@ -1,24 +1,20 @@
+// useChat.ts
 import { useEffect, useState } from "react";
 import { useMeetingContext } from "./MeetingProvider";
 import { ChatMessage } from "../types/meeting";
 
-export const useSecureChat = () => {
-  const { state, sendMessage } = useMeetingContext();
-
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export const useChat = () => {
+  const { sdk } = useMeetingContext();
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    sdk.state.getChatMessages(),
+  );
 
   useEffect(() => {
-    setMessages(state.getChatMessages());
-
-    const unsub = state.subscribe(() => {
-      setMessages(state.getChatMessages());
+    const unsubscribe = sdk.state.subscribe("chat", () => {
+      setMessages(sdk.state.getChatMessages());
     });
+    return unsubscribe;
+  }, [sdk]);
 
-    return () => unsub();
-  }, [state]);
-
-  return {
-    messages,
-    sendMessage,
-  };
+  return { messages, sendMessage: sdk.sendChatMessage.bind(sdk) };
 };
