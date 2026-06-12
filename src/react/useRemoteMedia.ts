@@ -26,7 +26,6 @@ export const useRemoteMedia = (participantId: string) => {
 
   const lastRef = useRef<any>(null);
 
-  // ---------------- VIDEO ----------------
   const videoRef = useCallback(
     (el: HTMLVideoElement | null) => {
       if (!el || !isCamActive) return;
