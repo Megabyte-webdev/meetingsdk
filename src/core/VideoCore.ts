@@ -523,6 +523,7 @@ export class VideoSDKCore {
         this.state.updateParticipantMedia(id, {
           stream: incomingStream,
           cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0],
         });
         this.events.onTrack?.(incomingStream, id);
       }

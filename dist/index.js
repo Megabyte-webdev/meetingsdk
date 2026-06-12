@@ -569,7 +569,8 @@ var VideoSDKCore = class {
       } else {
         this.state.updateParticipantMedia(id, {
           stream: incomingStream,
-          cameraTrack: incomingStream.getVideoTracks()[0]
+          cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0]
         });
         this.events.onTrack?.(incomingStream, id);
       }
@@ -984,31 +985,43 @@ var useParticipants = () => {
 var import_react6 = require("react");
 var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
-  const videoRef = (0, import_react6.useRef)(null);
-  const audioRef = (0, import_react6.useRef)(null);
   const [participant, setParticipant] = (0, import_react6.useState)(
     () => sdk.state.getParticipant(participantId) || null
   );
   (0, import_react6.useEffect)(() => {
     const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
-      const updated = sdk.state.getParticipant(participantId);
-      if (updated) {
-        setParticipant({ ...updated });
-      }
+      const p = sdk.state.getParticipant(participantId);
+      setParticipant(p ? { ...p } : null);
     });
     return unsub;
   }, [participantId, sdk]);
-  (0, import_react6.useEffect)(() => {
-    const stream = participant?.media?.stream;
-    if (stream) {
-      if (videoRef.current && videoRef.current.srcObject !== stream) {
-        videoRef.current.srcObject = stream;
-      }
-      if (audioRef.current && audioRef.current.srcObject !== stream) {
-        audioRef.current.srcObject = stream;
-      }
-    }
-  }, [participant?.media?.stream]);
+  const videoRef = (0, import_react6.useCallback)(
+    (node) => {
+      if (!node) return;
+      const stream = participant?.media?.stream;
+      if (!stream) return;
+      node.srcObject = stream;
+      node.autoplay = true;
+      node.playsInline = true;
+      node.muted = true;
+      node.play().catch((e) => console.warn("Video playback failed:", e));
+    },
+    // FIX: Added cameraTrack so React knows to re-run this when the video track arrives
+    [participant?.media?.stream, participant?.media?.cameraTrack]
+  );
+  const audioRef = (0, import_react6.useCallback)(
+    (node) => {
+      if (!node) return;
+      const stream = participant?.media?.stream;
+      if (!stream) return;
+      node.srcObject = stream;
+      node.autoplay = true;
+      node.muted = !participant?.media?.micEnabled;
+      node.play().catch((e) => console.warn("Audio playback failed:", e));
+    },
+    // FIX: Added audioTrack to dependency array
+    [participant?.media?.stream, participant?.media?.micEnabled]
+  );
   return {
     videoRef,
     audioRef,
