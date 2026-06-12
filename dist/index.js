@@ -554,7 +554,7 @@ var VideoSDKCore = class {
     pc.ontrack = (event) => {
       const incomingStream = event.streams[0];
       const participant = this.state.getParticipant(id);
-      const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId || participant?.media?.stream && participant.media.stream.id !== incomingStream.id;
+      const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
       if (isScreenStream) {
         const videoTrack = event.track.kind === "video" ? event.track : incomingStream.getVideoTracks()[0] || participant?.media?.screenTrack;
         this.state.updateParticipantMedia(id, {
@@ -984,9 +984,9 @@ var useParticipants = () => {
 var import_react6 = require("react");
 var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
-  const [participant, setParticipant] = (0, import_react6.useState)(
-    () => sdk.state.getParticipant(participantId) || null
-  );
+  const [participant, setParticipant] = (0, import_react6.useState)(() => {
+    return sdk.state.getParticipant(participantId) || null;
+  });
   (0, import_react6.useEffect)(() => {
     return sdk.state.subscribe(`participant:${participantId}`, () => {
       const updated = sdk.state.getParticipant(participantId);
@@ -994,38 +994,49 @@ var useRemoteMedia = (participantId) => {
     });
   }, [participantId, sdk]);
   const stream = participant?.media?.stream;
-  const track = participant?.media?.cameraTrack;
-  const hasVideo = !!(stream || track && track.kind === "video");
-  const isCamActive = !!(participant?.media?.camEnabled && hasVideo);
+  const videoTrack = participant?.media?.cameraTrack;
+  const audioTrack = participant?.media?.audioTrack;
+  const isCamActive = !!participant?.media?.camEnabled;
   const isMicEnabled = !!participant?.media?.micEnabled;
-  const lastRef = (0, import_react6.useRef)(null);
   const videoRef = (0, import_react6.useCallback)(
     (el) => {
-      if (!el || !isCamActive) return;
-      const source = stream || (track ? new MediaStream([track]) : null);
-      if (!source) return;
-      if (lastRef.current === source) return;
-      lastRef.current = source;
-      if (el.srcObject !== source) {
-        el.srcObject = source;
+      if (!el) return;
+      let streamToUse = null;
+      if (videoTrack && videoTrack.kind === "video") {
+        if (videoTrack.readyState === "live") {
+          streamToUse = new MediaStream([videoTrack]);
+        }
+      } else if (stream instanceof MediaStream) {
+        streamToUse = stream;
+      }
+      if (!streamToUse) return;
+      if (el.srcObject !== streamToUse) {
+        el.srcObject = streamToUse;
       }
       el.play().catch(() => {
       });
     },
-    [stream, track, isCamActive]
+    [stream, videoTrack]
   );
   const audioRef = (0, import_react6.useCallback)(
     (el) => {
-      if (!el || !stream) return;
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-        el.autoplay = true;
+      if (!el) return;
+      let audioStream = null;
+      if (audioTrack && audioTrack.kind === "audio") {
+        if (audioTrack.readyState === "live") {
+          audioStream = new MediaStream([audioTrack]);
+        }
+      } else if (stream instanceof MediaStream) {
+        audioStream = stream;
       }
-      el.muted = false;
+      if (!audioStream) return;
+      if (el.srcObject !== audioStream) {
+        el.srcObject = audioStream;
+      }
       el.play().catch(() => {
       });
     },
-    [stream]
+    [stream, audioTrack]
   );
   return {
     videoRef,

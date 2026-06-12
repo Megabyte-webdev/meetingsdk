@@ -496,13 +496,9 @@ export class VideoSDKCore {
       const participant = this.state.getParticipant(id);
 
       const isScreenStream =
-        incomingStream.id === participant?.media?.remoteScreenStreamId ||
-        (participant?.media?.stream &&
-          participant.media.stream.id !== incomingStream.id);
+        incomingStream.id === participant?.media?.remoteScreenStreamId;
 
       if (isScreenStream) {
-        // CRITICAL FIX: Ensure we safely grab the video track.
-        // If this specific event fired for the audio track, fallback to what's already in the stream or state.
         const videoTrack =
           event.track.kind === "video"
             ? event.track

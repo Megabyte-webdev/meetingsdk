@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useMeetingContext } from "./MeetingProvider";
 import { Participant } from "../types/meeting";
 
 export const useRemoteMedia = (participantId: string) => {
   const { sdk } = useMeetingContext();
 
-  const [participant, setParticipant] = useState<Participant | null>(
-    () => sdk.state.getParticipant(participantId) || null,
-  );
+  const [participant, setParticipant] = useState<Participant | null>(() => {
+    return sdk.state.getParticipant(participantId) || null;
+  });
 
   useEffect(() => {
     return sdk.state.subscribe(`participant:${participantId}`, () => {
@@ -17,49 +17,62 @@ export const useRemoteMedia = (participantId: string) => {
   }, [participantId, sdk]);
 
   const stream = participant?.media?.stream;
-  const track = participant?.media?.cameraTrack;
+  const videoTrack = participant?.media?.cameraTrack;
+  const audioTrack = participant?.media?.audioTrack;
 
-  const hasVideo = !!(stream || (track && track.kind === "video"));
-
-  const isCamActive = !!(participant?.media?.camEnabled && hasVideo);
+  const isCamActive = !!participant?.media?.camEnabled;
   const isMicEnabled = !!participant?.media?.micEnabled;
 
-  const lastRef = useRef<any>(null);
-
+  // ---------------- VIDEO ----------------
   const videoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      if (!el || !isCamActive) return;
+      if (!el) return;
 
-      const source = stream || (track ? new MediaStream([track]) : null);
-      if (!source) return;
+      let streamToUse: MediaStream | null = null;
 
-      if (lastRef.current === source) return;
-      lastRef.current = source;
+      if (videoTrack && videoTrack.kind === "video") {
+        if (videoTrack.readyState === "live") {
+          streamToUse = new MediaStream([videoTrack]);
+        }
+      } else if (stream instanceof MediaStream) {
+        streamToUse = stream;
+      }
 
-      if (el.srcObject !== source) {
-        el.srcObject = source;
+      if (!streamToUse) return;
+
+      if (el.srcObject !== streamToUse) {
+        el.srcObject = streamToUse;
       }
 
       el.play().catch(() => {});
     },
-    [stream, track, isCamActive],
+    [stream, videoTrack],
   );
 
-  // ---------------- AUDIO (hidden but crucial) ----------------
+  // ---------------- AUDIO ----------------
   const audioRef = useCallback(
     (el: HTMLAudioElement | null) => {
-      if (!el || !stream) return;
+      if (!el) return;
 
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-        el.autoplay = true;
+      let audioStream: MediaStream | null = null;
+
+      if (audioTrack && audioTrack.kind === "audio") {
+        if (audioTrack.readyState === "live") {
+          audioStream = new MediaStream([audioTrack]);
+        }
+      } else if (stream instanceof MediaStream) {
+        audioStream = stream;
       }
 
-      el.muted = false;
+      if (!audioStream) return;
+
+      if (el.srcObject !== audioStream) {
+        el.srcObject = audioStream;
+      }
 
       el.play().catch(() => {});
     },
-    [stream],
+    [stream, audioTrack],
   );
 
   return {
