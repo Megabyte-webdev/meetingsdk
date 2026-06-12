@@ -199,10 +199,11 @@ declare const useMeeting: (handlers?: {
 
 declare const useParticipants: () => Participant[];
 
-declare const useRemoteVideo: (participantId: string) => {
-    videoRef: (videoEl: HTMLVideoElement | null) => void;
+declare const useRemoteMedia: (participantId: string) => {
+    videoRef: (el: HTMLVideoElement | null) => void;
+    audioRef: (el: HTMLAudioElement | null) => void;
     isCamActive: boolean;
     isMicEnabled: boolean;
 };
 
-export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalParticipant, useMeeting, useMeetingContext, useParticipants, useRemoteVideo };
+export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalParticipant, useMeeting, useMeetingContext, useParticipants, useRemoteMedia };

@@ -27,7 +27,7 @@ __export(index_exports, {
   useMeeting: () => useMeeting,
   useMeetingContext: () => useMeetingContext,
   useParticipants: () => useParticipants,
-  useRemoteVideo: () => useRemoteVideo
+  useRemoteMedia: () => useRemoteMedia
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -484,14 +484,6 @@ var VideoSDKCore = class {
         } else if (kind === "video") {
           this.state.updateParticipantMedia(peerId2, { camEnabled: enabled });
           this.events.onCamToggled?.(peerId2, enabled);
-        }
-        const pc = this.peers[peerId2];
-        if (pc) {
-          pc.getReceivers().forEach((receiver) => {
-            if (receiver.track && receiver.track.kind === kind) {
-              receiver.track.enabled = enabled;
-            }
-          });
         }
         break;
       }
@@ -988,62 +980,59 @@ var useParticipants = () => {
   return participants;
 };
 
-// src/react/useRemoteVideo.ts
+// src/react/useRemoteMedia.ts
 var import_react6 = require("react");
-var useRemoteVideo = (participantId) => {
+var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
-  const [participant, setParticipant] = (0, import_react6.useState)(() => {
-    return sdk.state.getParticipant(participantId) || null;
-  });
+  const [participant, setParticipant] = (0, import_react6.useState)(
+    () => sdk.state.getParticipant(participantId) || null
+  );
   (0, import_react6.useEffect)(() => {
-    const unsubscribe = sdk.state.subscribe(
-      `participant:${participantId}`,
-      () => {
-        const updated = sdk.state.getParticipant(participantId);
-        if (updated) {
-          setParticipant({ ...updated });
-        }
-      }
-    );
-    return unsubscribe;
+    return sdk.state.subscribe(`participant:${participantId}`, () => {
+      const updated = sdk.state.getParticipant(participantId);
+      if (updated) setParticipant({ ...updated });
+    });
   }, [participantId, sdk]);
-  const streamSource = participant?.media?.stream;
-  const trackSource = participant?.media?.cameraTrack;
-  const hasValidVideoSource = !!(streamSource && (streamSource.id || streamSource instanceof MediaStream) || trackSource && (trackSource.id || trackSource.kind || trackSource instanceof MediaStreamTrack));
-  const isCamActive = !!(participant?.media?.camEnabled && hasValidVideoSource);
+  const stream = participant?.media?.stream;
+  const track = participant?.media?.cameraTrack;
+  const hasVideo = !!(stream || track && track.kind === "video");
+  const isCamActive = !!(participant?.media?.camEnabled && hasVideo);
   const isMicEnabled = !!participant?.media?.micEnabled;
-  const lastSourceRef = (0, import_react6.useRef)(null);
+  const lastRef = (0, import_react6.useRef)(null);
   const videoRef = (0, import_react6.useCallback)(
-    (videoEl) => {
-      if (!videoEl || !isCamActive) return;
-      const currentSource = streamSource?.id ? streamSource : trackSource;
-      if (lastSourceRef.current === currentSource) return;
-      lastSourceRef.current = currentSource;
-      if (streamSource && streamSource.id) {
-        if (videoEl.srcObject !== streamSource) {
-          videoEl.srcObject = streamSource;
-        }
-      } else if (trackSource && trackSource.kind === "video") {
-        const currentStream = videoEl.srcObject;
-        const currentTrack = currentStream?.getVideoTracks()[0];
-        if (!currentTrack || currentTrack.id !== trackSource.id) {
-          try {
-            videoEl.srcObject = new MediaStream([trackSource]);
-          } catch (err) {
-            console.error(
-              "Seamless WebRTC track fallback binding failed:",
-              err
-            );
-          }
-        }
+    (el) => {
+      if (!el || !isCamActive) return;
+      const source = stream || (track ? new MediaStream([track]) : null);
+      if (!source) return;
+      if (lastRef.current === source) return;
+      lastRef.current = source;
+      if (el.srcObject !== source) {
+        el.srcObject = source;
       }
-      videoEl.play().catch((err) => {
-        console.warn(`Autoplay interrupted for peer ${participantId}:`, err);
+      el.play().catch(() => {
       });
     },
-    [streamSource, trackSource, isCamActive, participantId]
+    [stream, track, isCamActive]
   );
-  return { videoRef, isCamActive, isMicEnabled };
+  const audioRef = (0, import_react6.useCallback)(
+    (el) => {
+      if (!el || !stream) return;
+      if (el.srcObject !== stream) {
+        el.srcObject = stream;
+        el.autoplay = true;
+      }
+      el.muted = false;
+      el.play().catch(() => {
+      });
+    },
+    [stream]
+  );
+  return {
+    videoRef,
+    audioRef,
+    isCamActive,
+    isMicEnabled
+  };
 };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
@@ -1054,6 +1043,6 @@ var useRemoteVideo = (participantId) => {
   useMeeting,
   useMeetingContext,
   useParticipants,
-  useRemoteVideo
+  useRemoteMedia
 });
 //# sourceMappingURL=index.js.map

@@ -452,14 +452,6 @@ var VideoSDKCore = class {
           this.state.updateParticipantMedia(peerId2, { camEnabled: enabled });
           this.events.onCamToggled?.(peerId2, enabled);
         }
-        const pc = this.peers[peerId2];
-        if (pc) {
-          pc.getReceivers().forEach((receiver) => {
-            if (receiver.track && receiver.track.kind === kind) {
-              receiver.track.enabled = enabled;
-            }
-          });
-        }
         break;
       }
       case "CHAT_MESSAGE": {
@@ -955,62 +947,59 @@ var useParticipants = () => {
   return participants;
 };
 
-// src/react/useRemoteVideo.ts
+// src/react/useRemoteMedia.ts
 import { useCallback as useCallback2, useEffect as useEffect5, useRef as useRef3, useState as useState4 } from "react";
-var useRemoteVideo = (participantId) => {
+var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
-  const [participant, setParticipant] = useState4(() => {
-    return sdk.state.getParticipant(participantId) || null;
-  });
+  const [participant, setParticipant] = useState4(
+    () => sdk.state.getParticipant(participantId) || null
+  );
   useEffect5(() => {
-    const unsubscribe = sdk.state.subscribe(
-      `participant:${participantId}`,
-      () => {
-        const updated = sdk.state.getParticipant(participantId);
-        if (updated) {
-          setParticipant({ ...updated });
-        }
-      }
-    );
-    return unsubscribe;
+    return sdk.state.subscribe(`participant:${participantId}`, () => {
+      const updated = sdk.state.getParticipant(participantId);
+      if (updated) setParticipant({ ...updated });
+    });
   }, [participantId, sdk]);
-  const streamSource = participant?.media?.stream;
-  const trackSource = participant?.media?.cameraTrack;
-  const hasValidVideoSource = !!(streamSource && (streamSource.id || streamSource instanceof MediaStream) || trackSource && (trackSource.id || trackSource.kind || trackSource instanceof MediaStreamTrack));
-  const isCamActive = !!(participant?.media?.camEnabled && hasValidVideoSource);
+  const stream = participant?.media?.stream;
+  const track = participant?.media?.cameraTrack;
+  const hasVideo = !!(stream || track && track.kind === "video");
+  const isCamActive = !!(participant?.media?.camEnabled && hasVideo);
   const isMicEnabled = !!participant?.media?.micEnabled;
-  const lastSourceRef = useRef3(null);
+  const lastRef = useRef3(null);
   const videoRef = useCallback2(
-    (videoEl) => {
-      if (!videoEl || !isCamActive) return;
-      const currentSource = streamSource?.id ? streamSource : trackSource;
-      if (lastSourceRef.current === currentSource) return;
-      lastSourceRef.current = currentSource;
-      if (streamSource && streamSource.id) {
-        if (videoEl.srcObject !== streamSource) {
-          videoEl.srcObject = streamSource;
-        }
-      } else if (trackSource && trackSource.kind === "video") {
-        const currentStream = videoEl.srcObject;
-        const currentTrack = currentStream?.getVideoTracks()[0];
-        if (!currentTrack || currentTrack.id !== trackSource.id) {
-          try {
-            videoEl.srcObject = new MediaStream([trackSource]);
-          } catch (err) {
-            console.error(
-              "Seamless WebRTC track fallback binding failed:",
-              err
-            );
-          }
-        }
+    (el) => {
+      if (!el || !isCamActive) return;
+      const source = stream || (track ? new MediaStream([track]) : null);
+      if (!source) return;
+      if (lastRef.current === source) return;
+      lastRef.current = source;
+      if (el.srcObject !== source) {
+        el.srcObject = source;
       }
-      videoEl.play().catch((err) => {
-        console.warn(`Autoplay interrupted for peer ${participantId}:`, err);
+      el.play().catch(() => {
       });
     },
-    [streamSource, trackSource, isCamActive, participantId]
+    [stream, track, isCamActive]
   );
-  return { videoRef, isCamActive, isMicEnabled };
+  const audioRef = useCallback2(
+    (el) => {
+      if (!el || !stream) return;
+      if (el.srcObject !== stream) {
+        el.srcObject = stream;
+        el.autoplay = true;
+      }
+      el.muted = false;
+      el.play().catch(() => {
+      });
+    },
+    [stream]
+  );
+  return {
+    videoRef,
+    audioRef,
+    isCamActive,
+    isMicEnabled
+  };
 };
 export {
   MeetingProvider,
@@ -1020,6 +1009,6 @@ export {
   useMeeting,
   useMeetingContext,
   useParticipants,
-  useRemoteVideo
+  useRemoteMedia
 };
 //# sourceMappingURL=index.mjs.map

@@ -409,14 +409,6 @@ export class VideoSDKCore {
           this.events.onCamToggled?.(peerId, enabled);
         }
 
-        const pc = this.peers[peerId];
-        if (pc) {
-          pc.getReceivers().forEach((receiver) => {
-            if (receiver.track && receiver.track.kind === kind) {
-              receiver.track.enabled = enabled;
-            }
-          });
-        }
         break;
       }
 
