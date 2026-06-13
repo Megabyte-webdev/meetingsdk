@@ -382,7 +382,6 @@ var VideoSDKCore = class {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
         }
         break;
       case "JOINED": {
@@ -405,8 +404,8 @@ var VideoSDKCore = class {
       case "ANSWER": {
         const pc = this.peers[msg.sender];
         if (!pc) return;
-        if (pc.signalingState !== "have-local-offer") {
-          console.warn("Ignoring invalid answer:", pc.signalingState);
+        if (pc.signalingState === "stable") {
+          console.warn("Late answer received, restarting negotiation");
           return;
         }
         await pc.setRemoteDescription({
@@ -508,6 +507,14 @@ var VideoSDKCore = class {
   // ---------------- PEER ----------------
   createPeer(id) {
     if (!this.localStream) throw new Error("No local stream");
+    console.log(
+      "Adding tracks",
+      this.localStream.getTracks().map((t) => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        state: t.readyState
+      }))
+    );
     const pc = new RTCPeerConnection({
       iceServers: [
         {
@@ -573,17 +580,10 @@ var VideoSDKCore = class {
   }
   // ---------------- OFFER ----------------
   async createOffer(id, isRenegotiation = false) {
-    if (!isRenegotiation && this.initiators.has(id)) return;
-    if (!isRenegotiation) {
-      this.initiators.add(id);
-    }
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
     const pc = this.peers[id];
-    if (pc.signalingState !== "stable") {
-      return;
-    }
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     this.send({
@@ -635,39 +635,55 @@ var VideoSDKCore = class {
     this.state.removeParticipant(id);
   }
   async startScreenShare() {
-    if (this.state.presenterId && this.state.presenterId !== this.myId) {
-      throw new Error("Another user is already sharing their screen.");
-    }
-    this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true
-    });
-    this.isScreenSharing = true;
-    this.state.updateLocalParticipant({
-      media: {
-        isScreenSharing: true,
-        screenStream: this.screenStream
+    try {
+      if (this.state.presenterId && this.state.presenterId !== this.myId) {
+        throw new Error("Another user is already sharing their screen.");
       }
-    });
-    this.state.setPresenterId(this.myId);
-    this.screenStream.getVideoTracks()[0].onended = () => {
-      this.stopScreenShare();
-    };
-    Object.entries(this.peers).forEach(([peerId, pc]) => {
-      this.screenSenders[peerId] = [];
-      this.screenStream.getTracks().forEach((track) => {
-        const sender = pc.addTrack(track, this.screenStream);
-        this.screenSenders[peerId].push(sender);
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        throw new Error("Screen sharing not supported on this device");
+      }
+      this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true
+        // audio: true,
       });
-      this.createOffer(peerId, true);
-    });
-    this.send({
-      type: "SCREEN_SHARE_START",
-      sender: this.myId,
-      room_id: this.roomId,
-      stream_id: this.screenStream.id.replace(/[{}]/g, "")
-    });
-    return this.screenStream;
+      this.isScreenSharing = true;
+      this.state.updateLocalParticipant({
+        media: {
+          isScreenSharing: true,
+          screenStream: this.screenStream,
+          screenTrack: this.screenStream.getVideoTracks()[0]
+        }
+      });
+      this.state.setPresenterId(this.myId);
+      this.screenStream.getVideoTracks()[0].onended = () => {
+        this.stopScreenShare();
+      };
+      Object.entries(this.peers).forEach(([peerId, pc]) => {
+        this.screenSenders[peerId] = [];
+        this.screenStream.getTracks().forEach((track) => {
+          const sender = pc.addTrack(track, this.screenStream);
+          this.screenSenders[peerId].push(sender);
+        });
+        this.createOffer(peerId, true);
+      });
+      this.send({
+        type: "SCREEN_SHARE_START",
+        sender: this.myId,
+        room_id: this.roomId,
+        stream_id: this.screenStream.id.replace(/[{}]/g, "")
+      });
+      return this.screenStream;
+    } catch (err) {
+      this.emitError(
+        "SCREEN_SHARE_FAILED",
+        err?.message || "Failed to start screen sharing",
+        err,
+        true
+      );
+      this.isScreenSharing = false;
+      this.screenStream = null;
+      throw err;
+    }
   }
   stopScreenShare() {
     if (!this.screenStream) return;
@@ -905,7 +921,6 @@ var useLocalParticipant = () => {
       video.srcObject = stream;
       video.autoplay = true;
       video.playsInline = true;
-      video.muted = true;
       video.play().catch((err) => {
         console.warn(`Autoplay failed for local view:`, err);
       });
@@ -955,6 +970,15 @@ var useRemoteMedia = (participantId) => {
   const [participant, setParticipant] = useState4(
     () => sdk.state.getParticipant(participantId) || null
   );
+  const buildMediaStream = (participant2) => {
+    if (!participant2?.media) return null;
+    const stream = new MediaStream();
+    const videoTrack = participant2.media.stream?.getVideoTracks?.()?.[0];
+    const audioTrack = participant2.media.stream?.getAudioTracks?.()?.[0];
+    if (videoTrack) stream.addTrack(videoTrack);
+    if (audioTrack) stream.addTrack(audioTrack);
+    return stream;
+  };
   useEffect5(() => {
     const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
       const p = sdk.state.getParticipant(participantId);
@@ -967,27 +991,28 @@ var useRemoteMedia = (participantId) => {
       if (!node) return;
       const stream = participant?.media?.stream;
       if (!stream) return;
+      node.pause();
       node.srcObject = stream;
-      node.autoplay = true;
-      node.playsInline = true;
       node.muted = true;
-      node.play().catch((e) => console.warn("Video playback failed:", e));
+      node.playsInline = true;
+      node.autoplay = true;
+      node.play().catch(() => {
+      });
     },
-    // FIX: Added cameraTrack so React knows to re-run this when the video track arrives
-    [participant?.media?.stream, participant?.media?.cameraTrack]
+    [participant?.media?.stream]
   );
   const audioRef = useCallback2(
     (node) => {
       if (!node) return;
       const stream = participant?.media?.stream;
       if (!stream) return;
+      node.pause();
       node.srcObject = stream;
-      node.autoplay = true;
-      node.muted = !participant?.media?.micEnabled;
-      node.play().catch((e) => console.warn("Audio playback failed:", e));
+      node.muted = false;
+      node.play().catch(() => {
+      });
     },
-    // FIX: Added audioTrack to dependency array
-    [participant?.media?.stream, participant?.media?.micEnabled]
+    [participant?.media?.stream]
   );
   return {
     videoRef,

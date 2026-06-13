@@ -1,18 +1,30 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMeetingContext } from "./MeetingProvider";
 import { Participant } from "../types/meeting";
 
 export const useRemoteMedia = (participantId: string) => {
   const { sdk } = useMeetingContext();
-
   const [participant, setParticipant] = useState<Participant | null>(
     () => sdk.state.getParticipant(participantId) || null,
   );
 
+  const buildMediaStream = (participant: Participant | null) => {
+    if (!participant?.media) return null;
+
+    const stream = new MediaStream();
+
+    const videoTrack = participant.media.stream?.getVideoTracks?.()?.[0];
+    const audioTrack = participant.media.stream?.getAudioTracks?.()?.[0];
+
+    if (videoTrack) stream.addTrack(videoTrack);
+    if (audioTrack) stream.addTrack(audioTrack);
+
+    return stream;
+  };
+
   useEffect(() => {
     const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
       const p = sdk.state.getParticipant(participantId);
-      // Ensure we treat the state as immutable to trigger re-renders
       setParticipant(p ? { ...p } : null);
     });
     return unsub;
@@ -22,35 +34,42 @@ export const useRemoteMedia = (participantId: string) => {
   const videoRef = useCallback(
     (node: HTMLVideoElement | null) => {
       if (!node) return;
+
       const stream = participant?.media?.stream;
       if (!stream) return;
 
-      node.srcObject = stream;
-      node.autoplay = true;
-      node.playsInline = true;
-      node.muted = true; // Video should always be muted
+      node.pause();
 
-      node.play().catch((e) => console.warn("Video playback failed:", e));
+      // IMPORTANT: always force rebind (no conditions)
+      node.srcObject = stream;
+
+      node.muted = true;
+      node.playsInline = true;
+      node.autoplay = true;
+
+      node.play().catch(() => {
+        // ignore autoplay restrictions
+      });
     },
-    // FIX: Added cameraTrack so React knows to re-run this when the video track arrives
-    [participant?.media?.stream, participant?.media?.cameraTrack],
+    [participant?.media?.stream],
   );
 
   // Audio Callback Ref
   const audioRef = useCallback(
     (node: HTMLAudioElement | null) => {
       if (!node) return;
+
       const stream = participant?.media?.stream;
       if (!stream) return;
 
+      node.pause();
       node.srcObject = stream;
-      node.autoplay = true;
-      node.muted = !participant?.media?.micEnabled;
 
-      node.play().catch((e) => console.warn("Audio playback failed:", e));
+      node.muted = false;
+
+      node.play().catch(() => {});
     },
-    // FIX: Added audioTrack to dependency array
-    [participant?.media?.stream, participant?.media?.micEnabled],
+    [participant?.media?.stream],
   );
 
   return {

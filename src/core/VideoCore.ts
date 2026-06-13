@@ -313,7 +313,6 @@ export class VideoSDKCore {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
         }
         break;
 
@@ -332,6 +331,7 @@ export class VideoSDKCore {
         this.state.addParticipant(p);
 
         this.events.onUserJoined?.(p);
+        // await this.createOffer(p.id);
 
         break;
       }
@@ -342,10 +342,11 @@ export class VideoSDKCore {
 
       case "ANSWER": {
         const pc = this.peers[msg.sender];
+
         if (!pc) return;
 
-        if (pc.signalingState !== "have-local-offer") {
-          console.warn("Ignoring invalid answer:", pc.signalingState);
+        if (pc.signalingState === "stable") {
+          console.warn("Late answer received, restarting negotiation");
           return;
         }
 
@@ -354,7 +355,6 @@ export class VideoSDKCore {
           sdp: msg.payload,
         });
 
-        //  CRITICAL WEBRTC FIX: Flush cached ICE paths now that remoteDescription is set!
         await this.flushIce(msg.sender, pc);
 
         break;
@@ -479,6 +479,14 @@ export class VideoSDKCore {
   // ---------------- PEER ----------------
   private createPeer(id: string) {
     if (!this.localStream) throw new Error("No local stream");
+    console.log(
+      "Adding tracks",
+      this.localStream.getTracks().map((t) => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        state: t.readyState,
+      })),
+    );
 
     const pc = new RTCPeerConnection({
       iceServers: [
@@ -512,8 +520,6 @@ export class VideoSDKCore {
           isScreenSharing: true,
         });
 
-        // CRITICAL FIX: Late joiners never get SCREEN_SHARE_START.
-        // We must set the presenter ID here if it isn't set, otherwise the grid won't render the stage.
         if (!this.state.presenterId) {
           this.state.setPresenterId(id);
         }
@@ -564,22 +570,11 @@ export class VideoSDKCore {
 
   // ---------------- OFFER ----------------
   private async createOffer(id: string, isRenegotiation = false) {
-    // Only apply the initial glare gate if this is not a track renegotiation
-    if (!isRenegotiation && this.initiators.has(id)) return;
-
-    if (!isRenegotiation) {
-      this.initiators.add(id);
-    }
-
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
 
     const pc = this.peers[id];
-
-    if (pc.signalingState !== "stable") {
-      return;
-    }
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -650,49 +645,66 @@ export class VideoSDKCore {
   }
 
   async startScreenShare() {
-    if (this.state.presenterId && this.state.presenterId !== this.myId) {
-      throw new Error("Another user is already sharing their screen.");
-    }
+    try {
+      if (this.state.presenterId && this.state.presenterId !== this.myId) {
+        throw new Error("Another user is already sharing their screen.");
+      }
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        throw new Error("Screen sharing not supported on this device");
+      }
 
-    this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true,
-    });
-
-    this.isScreenSharing = true;
-
-    this.state.updateLocalParticipant({
-      media: {
-        isScreenSharing: true,
-        screenStream: this.screenStream,
-      },
-    });
-
-    this.state.setPresenterId(this.myId);
-    // Handle the user clicking browser's built-in "Stop Sharing" button
-    this.screenStream.getVideoTracks()[0].onended = () => {
-      this.stopScreenShare();
-    };
-
-    Object.entries(this.peers).forEach(([peerId, pc]) => {
-      this.screenSenders[peerId] = [];
-      this.screenStream!.getTracks().forEach((track) => {
-        const sender = pc.addTrack(track, this.screenStream!);
-        this.screenSenders[peerId].push(sender);
+      this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        // audio: true,
       });
 
-      // Renegotiate peer connection descriptors to notify remote side of new track footprint
-      this.createOffer(peerId, true);
-    });
+      this.isScreenSharing = true;
 
-    this.send({
-      type: "SCREEN_SHARE_START",
-      sender: this.myId,
-      room_id: this.roomId,
-      stream_id: this.screenStream.id.replace(/[{}]/g, ""),
-    });
+      this.state.updateLocalParticipant({
+        media: {
+          isScreenSharing: true,
+          screenStream: this.screenStream,
+          screenTrack: this.screenStream.getVideoTracks()[0],
+        },
+      });
 
-    return this.screenStream;
+      this.state.setPresenterId(this.myId);
+      // Handle the user clicking browser's built-in "Stop Sharing" button
+      this.screenStream.getVideoTracks()[0].onended = () => {
+        this.stopScreenShare();
+      };
+
+      Object.entries(this.peers).forEach(([peerId, pc]) => {
+        this.screenSenders[peerId] = [];
+        this.screenStream!.getTracks().forEach((track) => {
+          const sender = pc.addTrack(track, this.screenStream!);
+          this.screenSenders[peerId].push(sender);
+        });
+
+        // Renegotiate peer connection descriptors to notify remote side of new track footprint
+        this.createOffer(peerId, true);
+      });
+
+      this.send({
+        type: "SCREEN_SHARE_START",
+        sender: this.myId,
+        room_id: this.roomId,
+        stream_id: this.screenStream.id.replace(/[{}]/g, ""),
+      });
+
+      return this.screenStream;
+    } catch (err: any) {
+      this.emitError(
+        "SCREEN_SHARE_FAILED",
+        err?.message || "Failed to start screen sharing",
+        err,
+        true,
+      );
+
+      this.isScreenSharing = false;
+      this.screenStream = null;
+      throw err;
+    }
   }
 
   stopScreenShare() {

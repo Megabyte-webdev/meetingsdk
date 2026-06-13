@@ -43,7 +43,6 @@ export const useLocalParticipant = () => {
       video.srcObject = stream;
       video.autoplay = true;
       video.playsInline = true;
-      video.muted = true;
 
       video.play().catch((err) => {
         console.warn(`Autoplay failed for local view:`, err);
