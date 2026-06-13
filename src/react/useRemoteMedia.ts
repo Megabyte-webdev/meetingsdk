@@ -38,8 +38,6 @@ export const useRemoteMedia = (participantId: string) => {
       const stream = participant?.media?.stream;
       if (!stream) return;
 
-      node.pause();
-
       // IMPORTANT: always force rebind (no conditions)
       node.srcObject = stream;
 
@@ -47,8 +45,9 @@ export const useRemoteMedia = (participantId: string) => {
       node.playsInline = true;
       node.autoplay = true;
 
-      node.play().catch(() => {
+      node.play().catch((err) => {
         // ignore autoplay restrictions
+        console.log("can't play video:", err);
       });
     },
     [participant?.media?.stream],
@@ -62,12 +61,13 @@ export const useRemoteMedia = (participantId: string) => {
       const stream = participant?.media?.stream;
       if (!stream) return;
 
-      node.pause();
       node.srcObject = stream;
 
       node.muted = false;
 
-      node.play().catch(() => {});
+      node.play().catch((err) => {
+        console.log("can't play Audio:", err);
+      });
     },
     [participant?.media?.stream],
   );

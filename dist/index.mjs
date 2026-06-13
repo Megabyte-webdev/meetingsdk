@@ -382,6 +382,7 @@ var VideoSDKCore = class {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
+          await this.createOffer(p.id);
         }
         break;
       case "JOINED": {
@@ -396,6 +397,7 @@ var VideoSDKCore = class {
         if (!p?.id || p.id === this.myId) return;
         this.state.addParticipant(p);
         this.events.onUserJoined?.(p);
+        await this.createOffer(p.id);
         break;
       }
       case "OFFER":
@@ -404,15 +406,27 @@ var VideoSDKCore = class {
       case "ANSWER": {
         const pc = this.peers[msg.sender];
         if (!pc) return;
-        if (pc.signalingState === "stable") {
-          console.warn("Late answer received, restarting negotiation");
+        if (pc.signalingState !== "have-local-offer") {
+          console.warn(
+            `[Signaling] Unexpected ANSWER in state "${pc.signalingState}", ignoring`
+          );
           return;
         }
-        await pc.setRemoteDescription({
-          type: "answer",
-          sdp: msg.payload
-        });
-        await this.flushIce(msg.sender, pc);
+        try {
+          await pc.setRemoteDescription({
+            type: "answer",
+            sdp: msg.payload
+          });
+          await this.flushIce(msg.sender, pc);
+        } catch (err) {
+          console.error("[Signaling] Failed to apply answer:", err);
+          this.emitError(
+            "ANSWER_FAILED",
+            `Failed to apply answer from ${msg.sender}`,
+            err,
+            true
+          );
+        }
         break;
       }
       case "ICE": {
@@ -518,14 +532,36 @@ var VideoSDKCore = class {
     const pc = new RTCPeerConnection({
       iceServers: [
         {
-          urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302"
-          ]
+          urls: "stun:stun.relay.metered.ca:80"
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80",
+          username: "25aed888d2d360e9fae0e812",
+          credential: "WPYstojO9Wf3+HsQ"
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80?transport=tcp",
+          username: "25aed888d2d360e9fae0e812",
+          credential: "WPYstojO9Wf3+HsQ"
+        },
+        {
+          urls: "turn:global.relay.metered.ca:443",
+          username: "25aed888d2d360e9fae0e812",
+          credential: "WPYstojO9Wf3+HsQ"
+        },
+        {
+          urls: "turns:global.relay.metered.ca:443?transport=tcp",
+          username: "25aed888d2d360e9fae0e812",
+          credential: "WPYstojO9Wf3+HsQ"
         }
       ]
     });
     pc.ontrack = (event) => {
+      console.log(`Track received: ${event.track.kind}`, {
+        trackId: event.track.id,
+        streamCount: event.streams.length,
+        streamTrackCount: event.streams[0]?.getTracks().length
+      });
       const incomingStream = event.streams[0];
       const participant = this.state.getParticipant(id);
       const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
@@ -558,6 +594,15 @@ var VideoSDKCore = class {
         target: id
       });
     };
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE Connection State: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+        this.emitError(
+          "ICE_FAILED",
+          "Connection failed. Please check your network or refresh."
+        );
+      }
+    };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
         try {
@@ -580,47 +625,102 @@ var VideoSDKCore = class {
   }
   // ---------------- OFFER ----------------
   async createOffer(id, isRenegotiation = false) {
+    if (!isRenegotiation && this.initiators.has(id)) {
+      console.debug(
+        `[Offer] Already initiating with ${id}, skipping duplicate`
+      );
+      return;
+    }
+    if (isRenegotiation && this.peers[id]) {
+      const pc2 = this.peers[id];
+      if (pc2.signalingState !== "stable") {
+        console.warn(
+          `[Offer] Cannot renegotiate: peer in state "${pc2.signalingState}"`
+        );
+        return;
+      }
+    }
+    if (!isRenegotiation) {
+      this.initiators.add(id);
+    }
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
     const pc = this.peers[id];
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    this.send({
-      type: "OFFER",
-      payload: offer.sdp,
-      sender: this.myId,
-      target: id
-    });
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this.send({
+        type: "OFFER",
+        payload: offer.sdp,
+        sender: this.myId,
+        target: id
+      });
+      console.debug(`[Offer] Sent to ${id}`);
+    } catch (err) {
+      console.error(`[Offer] Failed for ${id}:`, err);
+      this.emitError(
+        "OFFER_FAILED",
+        `Failed to create offer for ${id}`,
+        err,
+        true
+      );
+    }
   }
   // ---------------- ANSWER ----------------
   async handleOffer(sdp, id) {
+    if (this.initiators.has(id) && this.peers[id]) {
+      const pc2 = this.peers[id];
+      if (pc2.signalingState !== "stable") {
+        console.warn(
+          `[Signaling] Offer collision with ${id}. We initiated, ignoring their offer.`
+        );
+        return;
+      }
+    }
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
     const pc = this.peers[id];
-    await pc.setRemoteDescription({
-      type: "offer",
-      sdp
-    });
-    const pending = this.pendingIceCandidates[id] || [];
-    for (const candidate of pending) {
-      try {
-        await pc.addIceCandidate(candidate);
-      } catch (err) {
-        console.warn(err);
+    try {
+      if (pc.signalingState !== "stable" && pc.signalingState !== "have-local-offer") {
+        console.warn(
+          `[Signaling] Cannot accept OFFER in state "${pc.signalingState}"`
+        );
+        return;
       }
+      await pc.setRemoteDescription({
+        type: "offer",
+        sdp
+      });
+      const pending = this.pendingIceCandidates[id] || [];
+      for (const candidate of pending) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (err) {
+          console.warn("[ICE] Failed to add candidate:", err);
+        }
+      }
+      delete this.pendingIceCandidates[id];
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await this.flushIce(id, pc);
+      this.send({
+        type: "ANSWER",
+        payload: answer.sdp,
+        sender: this.myId,
+        target: id
+      });
+      console.debug(`[Answer] Sent to ${id}`);
+    } catch (err) {
+      console.error(`[Signaling] Failed to handle OFFER from ${id}:`, err);
+      this.emitError(
+        "OFFER_HANDLING_FAILED",
+        `Failed to handle offer from ${id}`,
+        err,
+        true
+      );
     }
-    delete this.pendingIceCandidates[id];
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    await this.flushIce(id, pc);
-    this.send({
-      type: "ANSWER",
-      payload: answer.sdp,
-      sender: this.myId,
-      target: id
-    });
   }
   // ---------------- CLEANUP ----------------
   closePeer(id) {
@@ -991,12 +1091,12 @@ var useRemoteMedia = (participantId) => {
       if (!node) return;
       const stream = participant?.media?.stream;
       if (!stream) return;
-      node.pause();
       node.srcObject = stream;
       node.muted = true;
       node.playsInline = true;
       node.autoplay = true;
-      node.play().catch(() => {
+      node.play().catch((err) => {
+        console.log("can't play video:", err);
       });
     },
     [participant?.media?.stream]
@@ -1006,10 +1106,10 @@ var useRemoteMedia = (participantId) => {
       if (!node) return;
       const stream = participant?.media?.stream;
       if (!stream) return;
-      node.pause();
       node.srcObject = stream;
       node.muted = false;
-      node.play().catch(() => {
+      node.play().catch((err) => {
+        console.log("can't play Audio:", err);
       });
     },
     [participant?.media?.stream]
