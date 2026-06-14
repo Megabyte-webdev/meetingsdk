@@ -507,26 +507,12 @@ export class VideoSDKCore {
           urls: "stun:stun.relay.metered.ca:80",
         },
         {
-          urls: "turn:global.relay.metered.ca:80",
-          username: "25aed888d2d360e9fae0e812",
-          credential: "WPYstojO9Wf3+HsQ",
-        },
-        {
           urls: "turn:global.relay.metered.ca:80?transport=tcp",
           username: "25aed888d2d360e9fae0e812",
           credential: "WPYstojO9Wf3+HsQ",
         },
-        {
-          urls: "turn:global.relay.metered.ca:443",
-          username: "25aed888d2d360e9fae0e812",
-          credential: "WPYstojO9Wf3+HsQ",
-        },
-        {
-          urls: "turns:global.relay.metered.ca:443?transport=tcp",
-          username: "25aed888d2d360e9fae0e812",
-          credential: "WPYstojO9Wf3+HsQ",
-        },
       ],
+      iceTransportPolicy: "relay",
     });
 
     pc.ontrack = (event) => {
