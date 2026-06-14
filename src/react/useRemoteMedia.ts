@@ -4,73 +4,40 @@ import { Participant } from "../types/meeting";
 
 export const useRemoteMedia = (participantId: string) => {
   const { sdk } = useMeetingContext();
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const [participant, setParticipant] = useState<Participant | null>(
     () => sdk.state.getParticipant(participantId) || null,
   );
-
-  const buildMediaStream = (participant: Participant | null) => {
-    if (!participant?.media) return null;
-
-    const stream = new MediaStream();
-
-    const videoTrack = participant.media.stream?.getVideoTracks?.()?.[0];
-    const audioTrack = participant.media.stream?.getAudioTracks?.()?.[0];
-
-    if (videoTrack) stream.addTrack(videoTrack);
-    if (audioTrack) stream.addTrack(audioTrack);
-
-    return stream;
-  };
 
   useEffect(() => {
     const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
       const p = sdk.state.getParticipant(participantId);
       setParticipant(p ? { ...p } : null);
     });
+
     return unsub;
   }, [participantId, sdk]);
 
-  // Video Callback Ref
-  const videoRef = useCallback(
-    (node: HTMLVideoElement | null) => {
-      if (!node) return;
+  useEffect(() => {
+    const stream = participant?.media?.stream;
+    if (!stream) return;
 
-      const stream = participant?.media?.stream;
-      if (!stream) return;
+    // VIDEO
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.muted = true;
+      videoRef.current.playsInline = true;
+      videoRef.current.play().catch(() => {});
+    }
 
-      // IMPORTANT: always force rebind (no conditions)
-      node.srcObject = stream;
-
-      node.muted = true;
-      node.playsInline = true;
-      node.autoplay = true;
-
-      node.play().catch((err) => {
-        // ignore autoplay restrictions
-        console.log("can't play video:", err);
-      });
-    },
-    [participant?.media?.stream],
-  );
-
-  // Audio Callback Ref
-  const audioRef = useCallback(
-    (node: HTMLAudioElement | null) => {
-      if (!node) return;
-
-      const stream = participant?.media?.stream;
-      if (!stream) return;
-
-      node.srcObject = stream;
-
-      node.muted = false;
-
-      node.play().catch((err) => {
-        console.log("can't play Audio:", err);
-      });
-    },
-    [participant?.media?.stream],
-  );
+    // AUDIO
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play().catch(() => {});
+    }
+  }, [participant?.media?.stream]);
 
   return {
     videoRef,

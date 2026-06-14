@@ -200,6 +200,8 @@ var VideoSDKCore = class {
     this.ws = null;
     this.peers = {};
     this.initiators = /* @__PURE__ */ new Set();
+    this.lastPong = Date.now();
+    this.intentionalDisconnect = false;
     this.roomId = null;
     this.localStream = null;
     this.screenStream = null;
@@ -271,18 +273,18 @@ var VideoSDKCore = class {
         this.emitError("WS_ERROR", "WebSocket encountered an error", err, true);
       };
       this.ws.onclose = (e) => {
-        this.emitError(
-          "WS_CLOSED",
-          `Connection closed (${e.code}) ${e.reason || ""}`,
-          e,
-          true
-        );
         this.joinRejecter?.({
           code: "WS_CLOSED",
           message: "Connection closed before join completed",
           raw: e
         });
         this.joinRejecter = void 0;
+        if (this.intentionalDisconnect) {
+          return;
+        }
+        if (e.code === 1e3 || e.code === 1001) {
+          return;
+        }
         this.scheduleReconnect();
       };
       this.ws.onmessage = async (e) => {
@@ -406,33 +408,9 @@ var VideoSDKCore = class {
     var _a, _b, _c, _d;
     if (msg.sender === this.myId) return;
     switch (msg.type) {
-      case "EXISTING_USERS":
-        if (msg.presenterId) {
-          this.state.setPresenterId(msg.presenterId);
-          this.events.onScreenShareStarted?.(msg.presenterId, null);
-        }
-        for (const p of msg.participants || []) {
-          if (!p?.id || p.id === this.myId) continue;
-          this.state.addParticipant(p);
-          this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
-        }
+      case "PONG":
+        this.lastPong = Date.now();
         break;
-      case "JOINED": {
-        this.startHeartbeat();
-        this.joinResolver?.();
-        this.joinResolver = void 0;
-        this.joinRejecter = void 0;
-        break;
-      }
-      case "USER_JOINED": {
-        const p = msg.participant;
-        if (!p?.id || p.id === this.myId) return;
-        this.state.addParticipant(p);
-        this.events.onUserJoined?.(p);
-        await this.createOffer(p.id);
-        break;
-      }
       case "OFFER":
         await this.handleOffer(msg.payload, msg.sender);
         break;
@@ -480,6 +458,35 @@ var VideoSDKCore = class {
         } catch (err) {
           console.warn("ICE error:", err);
         }
+        break;
+      }
+      case "EXISTING_USERS":
+        if (msg.presenterId) {
+          this.state.setPresenterId(msg.presenterId);
+          this.events.onScreenShareStarted?.(msg.presenterId, null);
+        }
+        for (const p of msg.participants || []) {
+          if (!p?.id || p.id === this.myId) continue;
+          this.state.addParticipant(p);
+          this.events.onUserJoined?.(p);
+          await this.createOffer(p.id);
+        }
+        break;
+      case "JOINED": {
+        this.intentionalDisconnect = false;
+        this.reconnectAttempts = 0;
+        this.startHeartbeat();
+        this.joinResolver?.();
+        this.joinResolver = void 0;
+        this.joinRejecter = void 0;
+        break;
+      }
+      case "USER_JOINED": {
+        const p = msg.participant;
+        if (!p?.id || p.id === this.myId) return;
+        this.state.addParticipant(p);
+        this.events.onUserJoined?.(p);
+        await this.createOffer(p.id);
         break;
       }
       case "USER_LEFT":
@@ -595,9 +602,14 @@ var VideoSDKCore = class {
         streamCount: event.streams.length,
         streamTrackCount: event.streams[0]?.getTracks().length
       });
-      const incomingStream = event.streams[0];
+      const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
       const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
+      if (event.track.kind === "video") {
+        event.track.onunmute = () => {
+          console.log("Video track unmuted for", id);
+        };
+      }
       if (isScreenStream) {
         const videoTrack = event.track.kind === "video" ? event.track : incomingStream.getVideoTracks()[0] || participant?.media?.screenTrack;
         this.state.updateParticipantMedia(id, {
@@ -629,12 +641,6 @@ var VideoSDKCore = class {
     };
     pc.oniceconnectionstatechange = () => {
       console.log(`ICE Connection State: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
-        this.emitError(
-          "ICE_FAILED",
-          "Connection failed. Please check your network or refresh."
-        );
-      }
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
@@ -662,7 +668,6 @@ var VideoSDKCore = class {
       console.debug(
         `[Offer] Already initiating with ${id}, skipping duplicate`
       );
-      return;
     }
     if (isRenegotiation && this.peers[id]) {
       const pc2 = this.peers[id];
@@ -670,7 +675,6 @@ var VideoSDKCore = class {
         console.warn(
           `[Offer] Cannot renegotiate: peer in state "${pc2.signalingState}"`
         );
-        return;
       }
     }
     if (!isRenegotiation) {
@@ -702,15 +706,6 @@ var VideoSDKCore = class {
   }
   // ---------------- ANSWER ----------------
   async handleOffer(sdp, id) {
-    if (this.initiators.has(id) && this.peers[id]) {
-      const pc2 = this.peers[id];
-      if (pc2.signalingState !== "stable") {
-        console.warn(
-          `[Signaling] Offer collision with ${id}. We initiated, ignoring their offer.`
-        );
-        return;
-      }
-    }
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
@@ -884,6 +879,7 @@ var VideoSDKCore = class {
     });
   }
   disconnect() {
+    this.intentionalDisconnect = true;
     this.stopScreenShare();
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
@@ -1100,18 +1096,11 @@ var useParticipants = () => {
 var import_react6 = require("react");
 var useRemoteMedia = (participantId) => {
   const { sdk } = useMeetingContext();
+  const videoRef = (0, import_react6.useRef)(null);
+  const audioRef = (0, import_react6.useRef)(null);
   const [participant, setParticipant] = (0, import_react6.useState)(
     () => sdk.state.getParticipant(participantId) || null
   );
-  const buildMediaStream = (participant2) => {
-    if (!participant2?.media) return null;
-    const stream = new MediaStream();
-    const videoTrack = participant2.media.stream?.getVideoTracks?.()?.[0];
-    const audioTrack = participant2.media.stream?.getAudioTracks?.()?.[0];
-    if (videoTrack) stream.addTrack(videoTrack);
-    if (audioTrack) stream.addTrack(audioTrack);
-    return stream;
-  };
   (0, import_react6.useEffect)(() => {
     const unsub = sdk.state.subscribe(`participant:${participantId}`, () => {
       const p = sdk.state.getParticipant(participantId);
@@ -1119,34 +1108,22 @@ var useRemoteMedia = (participantId) => {
     });
     return unsub;
   }, [participantId, sdk]);
-  const videoRef = (0, import_react6.useCallback)(
-    (node) => {
-      if (!node) return;
-      const stream = participant?.media?.stream;
-      if (!stream) return;
-      node.srcObject = stream;
-      node.muted = true;
-      node.playsInline = true;
-      node.autoplay = true;
-      node.play().catch((err) => {
-        console.log("can't play video:", err);
+  (0, import_react6.useEffect)(() => {
+    const stream = participant?.media?.stream;
+    if (!stream) return;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.muted = true;
+      videoRef.current.playsInline = true;
+      videoRef.current.play().catch(() => {
       });
-    },
-    [participant?.media?.stream]
-  );
-  const audioRef = (0, import_react6.useCallback)(
-    (node) => {
-      if (!node) return;
-      const stream = participant?.media?.stream;
-      if (!stream) return;
-      node.srcObject = stream;
-      node.muted = false;
-      node.play().catch((err) => {
-        console.log("can't play Audio:", err);
+    }
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play().catch(() => {
       });
-    },
-    [participant?.media?.stream]
-  );
+    }
+  }, [participant?.media?.stream]);
   return {
     videoRef,
     audioRef,

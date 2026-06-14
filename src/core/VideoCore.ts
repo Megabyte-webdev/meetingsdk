@@ -12,6 +12,8 @@ export class VideoSDKCore {
   private ws: WebSocket | null = null;
   private peers: Record<string, RTCPeerConnection> = {};
   private initiators = new Set<string>();
+  private lastPong = Date.now();
+  private intentionalDisconnect = false;
 
   private myId: string;
   private roomId: string | null = null;
@@ -117,14 +119,6 @@ export class VideoSDKCore {
       };
 
       this.ws.onclose = (e) => {
-        this.emitError(
-          "WS_CLOSED",
-          `Connection closed (${e.code}) ${e.reason || ""}`,
-          e,
-          true,
-        );
-
-        // If join never resolved, fail the promise
         this.joinRejecter?.({
           code: "WS_CLOSED",
           message: "Connection closed before join completed",
@@ -132,6 +126,14 @@ export class VideoSDKCore {
         });
 
         this.joinRejecter = undefined;
+
+        if (this.intentionalDisconnect) {
+          return; // do NOT reconnect
+        }
+
+        if (e.code === 1000 || e.code === 1001) {
+          return;
+        }
 
         this.scheduleReconnect();
       };
@@ -191,10 +193,8 @@ export class VideoSDKCore {
     const mediaState = this.state.localParticipant?.media;
     if (!mediaState) return;
 
-    // Flip the state tracked in localParticipant.media
     const nextEnabled = !mediaState.micEnabled;
 
-    // Mirror the state change down to the actual hardware tracks
     this.localStream
       ?.getAudioTracks()
       .forEach((t) => (t.enabled = nextEnabled));
@@ -221,10 +221,8 @@ export class VideoSDKCore {
     const mediaState = this.state.localParticipant?.media;
     if (!mediaState) return;
 
-    // Flip the state tracked in localParticipant.media
     const nextEnabled = !mediaState.camEnabled;
 
-    // Mirror the state change down to the actual hardware tracks
     this.localStream
       ?.getVideoTracks()
       .forEach((t) => (t.enabled = nextEnabled));
@@ -301,42 +299,9 @@ export class VideoSDKCore {
     if (msg.sender === this.myId) return;
 
     switch (msg.type) {
-      case "EXISTING_USERS":
-        if (msg.presenterId) {
-          this.state.setPresenterId(msg.presenterId);
-
-          // Trigger your event so the UI knows to render the stage
-          this.events.onScreenShareStarted?.(msg.presenterId, null!);
-        }
-
-        for (const p of msg.participants || []) {
-          if (!p?.id || p.id === this.myId) continue;
-          this.state.addParticipant(p);
-          this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
-        }
+      case "PONG":
+        this.lastPong = Date.now();
         break;
-
-      case "JOINED": {
-        this.startHeartbeat();
-        this.joinResolver?.();
-        this.joinResolver = undefined;
-        this.joinRejecter = undefined;
-        break;
-      }
-      case "USER_JOINED": {
-        const p = msg.participant;
-
-        if (!p?.id || p.id === this.myId) return;
-
-        this.state.addParticipant(p);
-
-        this.events.onUserJoined?.(p);
-        await this.createOffer(p.id);
-
-        break;
-      }
-
       case "OFFER":
         await this.handleOffer(msg.payload, msg.sender);
         break;
@@ -371,7 +336,6 @@ export class VideoSDKCore {
         }
         break;
       }
-
       case "ICE": {
         const candidate = JSON.parse(msg.payload);
 
@@ -394,6 +358,43 @@ export class VideoSDKCore {
         } catch (err) {
           console.warn("ICE error:", err);
         }
+
+        break;
+      }
+      case "EXISTING_USERS":
+        if (msg.presenterId) {
+          this.state.setPresenterId(msg.presenterId);
+
+          // Trigger your event so the UI knows to render the stage
+          this.events.onScreenShareStarted?.(msg.presenterId, null!);
+        }
+
+        for (const p of msg.participants || []) {
+          if (!p?.id || p.id === this.myId) continue;
+          this.state.addParticipant(p);
+          this.events.onUserJoined?.(p);
+          await this.createOffer(p.id);
+        }
+        break;
+
+      case "JOINED": {
+        this.intentionalDisconnect = false;
+        this.reconnectAttempts = 0;
+        this.startHeartbeat();
+        this.joinResolver?.();
+        this.joinResolver = undefined;
+        this.joinRejecter = undefined;
+        break;
+      }
+      case "USER_JOINED": {
+        const p = msg.participant;
+
+        if (!p?.id || p.id === this.myId) return;
+
+        this.state.addParticipant(p);
+
+        this.events.onUserJoined?.(p);
+        await this.createOffer(p.id);
 
         break;
       }
@@ -534,11 +535,18 @@ export class VideoSDKCore {
         streamCount: event.streams.length,
         streamTrackCount: event.streams[0]?.getTracks().length,
       });
-      const incomingStream = event.streams[0];
+      const incomingStream =
+        event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
 
       const isScreenStream =
         incomingStream.id === participant?.media?.remoteScreenStreamId;
+
+      if (event.track.kind === "video") {
+        event.track.onunmute = () => {
+          console.log("Video track unmuted for", id);
+        };
+      }
 
       if (isScreenStream) {
         const videoTrack =
@@ -581,16 +589,6 @@ export class VideoSDKCore {
 
     pc.oniceconnectionstatechange = () => {
       console.log(`ICE Connection State: ${pc.iceConnectionState}`);
-      if (
-        pc.iceConnectionState === "failed" ||
-        pc.iceConnectionState === "disconnected"
-      ) {
-        // Trigger a UI notification to the user that the connection is unstable
-        this.emitError(
-          "ICE_FAILED",
-          "Connection failed. Please check your network or refresh.",
-        );
-      }
     };
 
     pc.onconnectionstatechange = () => {
@@ -622,7 +620,6 @@ export class VideoSDKCore {
       console.debug(
         `[Offer] Already initiating with ${id}, skipping duplicate`,
       );
-      return;
     }
 
     if (isRenegotiation && this.peers[id]) {
@@ -631,7 +628,6 @@ export class VideoSDKCore {
         console.warn(
           `[Offer] Cannot renegotiate: peer in state "${pc.signalingState}"`,
         );
-        return;
       }
     }
 
@@ -669,16 +665,6 @@ export class VideoSDKCore {
 
   // ---------------- ANSWER ----------------
   private async handleOffer(sdp: string, id: string) {
-    if (this.initiators.has(id) && this.peers[id]) {
-      const pc = this.peers[id];
-      if (pc.signalingState !== "stable") {
-        console.warn(
-          `[Signaling] Offer collision with ${id}. We initiated, ignoring their offer.`,
-        );
-        return; // We initiated, so ignore their offer
-      }
-    }
-
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
@@ -906,6 +892,7 @@ export class VideoSDKCore {
   }
 
   disconnect() {
+    this.intentionalDisconnect = true;
     this.stopScreenShare();
 
     Object.values(this.peers).forEach((pc) => pc.close());
