@@ -140,6 +140,7 @@ declare class VideoSDKCore {
     private handle;
     private createPeer;
     private createOffer;
+    private shouldInitiate;
     private handleOffer;
     private closePeer;
     startScreenShare(): Promise<MediaStream>;

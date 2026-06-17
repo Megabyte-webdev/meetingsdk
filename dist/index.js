@@ -234,24 +234,39 @@ var VideoSDKCore = class {
   // ---------------- STREAM ----------------
   async initLocal(video, name) {
     this.participantName = name;
-    if (!this.localStream) {
+    try {
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
       });
-    }
-    video.srcObject = this.localStream;
-    this.state.updateLocalParticipant({
-      id: this.myId,
-      name: this.participantName,
-      media: {
-        stream: this.localStream,
-        micEnabled: true,
-        camEnabled: true,
-        isScreenSharing: false
+      const hasVideo = this.localStream.getVideoTracks().some((t) => t.readyState === "live");
+      const hasAudio = this.localStream.getAudioTracks().some((t) => t.readyState === "live");
+      if (!hasVideo || !hasAudio) {
+        throw new Error(`Missing tracks: video=${hasVideo}, audio=${hasAudio}`);
       }
-    });
-    this.state.localStream = this.localStream;
+      video.srcObject = this.localStream;
+      this.state.updateLocalParticipant({
+        id: this.myId,
+        name: this.participantName,
+        media: {
+          stream: this.localStream,
+          micEnabled: true,
+          camEnabled: true,
+          isScreenSharing: false
+        }
+      });
+      this.state.localStream = this.localStream;
+    } catch (err) {
+      this.emitError("GET_USER_MEDIA_FAILED", err?.message, err, false);
+      throw err;
+    }
   }
   // ---------------- CONNECT ----------------
   async connect(roomId, name) {
@@ -412,10 +427,18 @@ var VideoSDKCore = class {
         this.lastPong = Date.now();
         break;
       case "OFFER":
+        console.log("[Offer] Received from", msg.sender, {
+          sdp: msg.payload.substring(0, 200)
+        });
         await this.handleOffer(msg.payload, msg.sender);
         break;
       case "ANSWER": {
         const pc = this.peers[msg.sender];
+        console.log("[Answer] Received from", msg.sender, {
+          signalingState: pc?.signalingState,
+          iceConnectionState: pc?.iceConnectionState,
+          connectionState: pc?.connectionState
+        });
         if (!pc) return;
         if (pc.signalingState !== "have-local-offer") {
           console.warn(
@@ -469,7 +492,9 @@ var VideoSDKCore = class {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
+          if (this.shouldInitiate(p.id)) {
+            await this.createOffer(p.id);
+          }
         }
         break;
       case "JOINED": {
@@ -486,7 +511,9 @@ var VideoSDKCore = class {
         if (!p?.id || p.id === this.myId) return;
         this.state.addParticipant(p);
         this.events.onUserJoined?.(p);
-        await this.createOffer(p.id);
+        if (this.shouldInitiate(p.id)) {
+          await this.createOffer(p.id);
+        }
         break;
       }
       case "USER_LEFT":
@@ -579,21 +606,21 @@ var VideoSDKCore = class {
           username: "25aed888d2d360e9fae0e812",
           credential: "WPYstojO9Wf3+HsQ"
         }
-      ],
-      iceTransportPolicy: "relay"
+      ]
     });
     pc.ontrack = (event) => {
-      console.log(`Track received: ${event.track.kind}`, {
-        trackId: event.track.id,
-        streamCount: event.streams.length,
-        streamTrackCount: event.streams[0]?.getTracks().length
+      console.log(`\u{1F3A5} Track received from ${id}:`, {
+        kind: event.track.kind,
+        muted: event.track.muted,
+        readyState: event.track.readyState,
+        enabled: event.track.enabled
       });
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
       const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
-      if (event.track.kind === "video") {
+      if (event.track.muted) {
         event.track.onunmute = () => {
-          console.log("Video track unmuted for", id);
+          console.log(`\u2705 ${event.track.kind} track unmuted for ${id}`);
         };
       }
       if (isScreenStream) {
@@ -650,18 +677,17 @@ var VideoSDKCore = class {
   }
   // ---------------- OFFER ----------------
   async createOffer(id, isRenegotiation = false) {
+    if (!isRenegotiation && !this.shouldInitiate(id)) {
+      console.debug(
+        `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`
+      );
+      return;
+    }
     if (!isRenegotiation && this.initiators.has(id)) {
       console.debug(
         `[Offer] Already initiating with ${id}, skipping duplicate`
       );
-    }
-    if (isRenegotiation && this.peers[id]) {
-      const pc2 = this.peers[id];
-      if (pc2.signalingState !== "stable") {
-        console.warn(
-          `[Offer] Cannot renegotiate: peer in state "${pc2.signalingState}"`
-        );
-      }
+      return;
     }
     if (!isRenegotiation) {
       this.initiators.add(id);
@@ -682,13 +708,10 @@ var VideoSDKCore = class {
       console.debug(`[Offer] Sent to ${id}`);
     } catch (err) {
       console.error(`[Offer] Failed for ${id}:`, err);
-      this.emitError(
-        "OFFER_FAILED",
-        `Failed to create offer for ${id}`,
-        err,
-        true
-      );
     }
+  }
+  shouldInitiate(peerId) {
+    return this.myId < peerId;
   }
   // ---------------- ANSWER ----------------
   async handleOffer(sdp, id) {
@@ -697,28 +720,44 @@ var VideoSDKCore = class {
     }
     const pc = this.peers[id];
     try {
-      if (pc.signalingState !== "stable" && pc.signalingState !== "have-local-offer") {
+      if (pc.signalingState === "have-local-offer") {
+        if (this.shouldInitiate(id)) {
+          console.warn(
+            `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`
+          );
+          return;
+        } else {
+          console.warn(
+            `[Glare] Both sent OFFERs, they win (${id} < ${this.myId}), rolling back`
+          );
+          pc.close();
+          delete this.peers[id];
+          this.initiators.delete(id);
+          this.peers[id] = this.createPeer(id);
+        }
+      }
+      if (this.peers[id].signalingState !== "stable" && this.peers[id].signalingState !== "have-local-offer") {
         console.warn(
-          `[Signaling] Cannot accept OFFER in state "${pc.signalingState}"`
+          `[Signaling] Cannot accept OFFER in state "${this.peers[id].signalingState}"`
         );
         return;
       }
-      await pc.setRemoteDescription({
+      await this.peers[id].setRemoteDescription({
         type: "offer",
         sdp
       });
       const pending = this.pendingIceCandidates[id] || [];
       for (const candidate of pending) {
         try {
-          await pc.addIceCandidate(candidate);
+          await this.peers[id].addIceCandidate(candidate);
         } catch (err) {
           console.warn("[ICE] Failed to add candidate:", err);
         }
       }
       delete this.pendingIceCandidates[id];
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await this.flushIce(id, pc);
+      const answer = await this.peers[id].createAnswer();
+      await this.peers[id].setLocalDescription(answer);
+      await this.flushIce(id, this.peers[id]);
       this.send({
         type: "ANSWER",
         payload: answer.sdp,

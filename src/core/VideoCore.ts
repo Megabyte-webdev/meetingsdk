@@ -70,28 +70,48 @@ export class VideoSDKCore {
   async initLocal(video: HTMLVideoElement, name: string) {
     this.participantName = name;
 
-    if (!this.localStream) {
+    try {
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
+
+      // ✅ Verify tracks are actually live BEFORE connecting
+      const hasVideo = this.localStream
+        .getVideoTracks()
+        .some((t) => t.readyState === "live");
+      const hasAudio = this.localStream
+        .getAudioTracks()
+        .some((t) => t.readyState === "live");
+
+      if (!hasVideo || !hasAudio) {
+        throw new Error(`Missing tracks: video=${hasVideo}, audio=${hasAudio}`);
+      }
+
+      video.srcObject = this.localStream;
+      this.state.updateLocalParticipant({
+        id: this.myId,
+        name: this.participantName,
+        media: {
+          stream: this.localStream,
+          micEnabled: true,
+          camEnabled: true,
+          isScreenSharing: false,
+        },
+      });
+
+      this.state.localStream = this.localStream;
+    } catch (err: any) {
+      this.emitError("GET_USER_MEDIA_FAILED", err?.message, err, false);
+      throw err;
     }
-
-    video.srcObject = this.localStream;
-
-    // Fix: Supply mandatory fields to satisfy the Participant type constraint
-    this.state.updateLocalParticipant({
-      id: this.myId,
-      name: this.participantName,
-      media: {
-        stream: this.localStream,
-        micEnabled: true,
-        camEnabled: true,
-        isScreenSharing: false,
-      },
-    });
-
-    this.state.localStream = this.localStream;
   }
 
   // ---------------- CONNECT ----------------
@@ -303,11 +323,19 @@ export class VideoSDKCore {
         this.lastPong = Date.now();
         break;
       case "OFFER":
+        console.log("[Offer] Received from", msg.sender, {
+          sdp: msg.payload.substring(0, 200),
+        });
         await this.handleOffer(msg.payload, msg.sender);
         break;
 
       case "ANSWER": {
         const pc = this.peers[msg.sender];
+        console.log("[Answer] Received from", msg.sender, {
+          signalingState: pc?.signalingState,
+          iceConnectionState: pc?.iceConnectionState,
+          connectionState: pc?.connectionState,
+        });
 
         if (!pc) return;
 
@@ -373,7 +401,9 @@ export class VideoSDKCore {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
-          await this.createOffer(p.id);
+          if (this.shouldInitiate(p.id)) {
+            await this.createOffer(p.id);
+          }
         }
         break;
 
@@ -394,7 +424,9 @@ export class VideoSDKCore {
         this.state.addParticipant(p);
 
         this.events.onUserJoined?.(p);
-        await this.createOffer(p.id);
+        if (this.shouldInitiate(p.id)) {
+          await this.createOffer(p.id);
+        }
 
         break;
       }
@@ -512,14 +544,14 @@ export class VideoSDKCore {
           credential: "WPYstojO9Wf3+HsQ",
         },
       ],
-      iceTransportPolicy: "relay",
     });
 
     pc.ontrack = (event) => {
-      console.log(`Track received: ${event.track.kind}`, {
-        trackId: event.track.id,
-        streamCount: event.streams.length,
-        streamTrackCount: event.streams[0]?.getTracks().length,
+      console.log(`🎥 Track received from ${id}:`, {
+        kind: event.track.kind,
+        muted: event.track.muted,
+        readyState: event.track.readyState,
+        enabled: event.track.enabled,
       });
       const incomingStream =
         event.streams?.[0] || new MediaStream([event.track]);
@@ -528,9 +560,10 @@ export class VideoSDKCore {
       const isScreenStream =
         incomingStream.id === participant?.media?.remoteScreenStreamId;
 
-      if (event.track.kind === "video") {
+      // ✅ Handle track unmuting (happens after RTP data starts flowing)
+      if (event.track.muted) {
         event.track.onunmute = () => {
-          console.log("Video track unmuted for", id);
+          console.log(`✅ ${event.track.kind} track unmuted for ${id}`);
         };
       }
 
@@ -602,19 +635,18 @@ export class VideoSDKCore {
 
   // ---------------- OFFER ----------------
   private async createOffer(id: string, isRenegotiation = false) {
+    if (!isRenegotiation && !this.shouldInitiate(id)) {
+      console.debug(
+        `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`,
+      );
+      return; // ← Actually return!
+    }
+
     if (!isRenegotiation && this.initiators.has(id)) {
       console.debug(
         `[Offer] Already initiating with ${id}, skipping duplicate`,
       );
-    }
-
-    if (isRenegotiation && this.peers[id]) {
-      const pc = this.peers[id];
-      if (pc.signalingState !== "stable") {
-        console.warn(
-          `[Offer] Cannot renegotiate: peer in state "${pc.signalingState}"`,
-        );
-      }
+      return; // ← This was missing!
     }
 
     if (!isRenegotiation) {
@@ -640,13 +672,12 @@ export class VideoSDKCore {
       console.debug(`[Offer] Sent to ${id}`);
     } catch (err) {
       console.error(`[Offer] Failed for ${id}:`, err);
-      this.emitError(
-        "OFFER_FAILED",
-        `Failed to create offer for ${id}`,
-        err,
-        true,
-      );
     }
+  }
+
+  private shouldInitiate(peerId: string): boolean {
+    // Lexicographic comparison: lower ID initiates
+    return this.myId < peerId;
   }
 
   // ---------------- ANSWER ----------------
@@ -658,18 +689,40 @@ export class VideoSDKCore {
     const pc = this.peers[id];
 
     try {
+      // ✅ GLARE RECOVERY: Both peers sent OFFERs simultaneously
+      if (pc.signalingState === "have-local-offer") {
+        if (this.shouldInitiate(id)) {
+          // WE WIN: Keep our offer, reject theirs
+          console.warn(
+            `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`,
+          );
+          return; // ← Ignore their offer, wait for their ANSWER
+        } else {
+          // THEY WIN: Roll back and accept their offer
+          console.warn(
+            `[Glare] Both sent OFFERs, they win (${id} < ${this.myId}), rolling back`,
+          );
+          pc.close();
+          delete this.peers[id];
+          this.initiators.delete(id);
+
+          // Create fresh peer connection to answer their offer
+          this.peers[id] = this.createPeer(id);
+        }
+      }
+
       // ✅ Only set remote description if we're not already in negotiation
       if (
-        pc.signalingState !== "stable" &&
-        pc.signalingState !== "have-local-offer"
+        this.peers[id].signalingState !== "stable" &&
+        this.peers[id].signalingState !== "have-local-offer"
       ) {
         console.warn(
-          `[Signaling] Cannot accept OFFER in state "${pc.signalingState}"`,
+          `[Signaling] Cannot accept OFFER in state "${this.peers[id].signalingState}"`,
         );
         return;
       }
 
-      await pc.setRemoteDescription({
+      await this.peers[id].setRemoteDescription({
         type: "offer",
         sdp,
       });
@@ -678,7 +731,7 @@ export class VideoSDKCore {
 
       for (const candidate of pending) {
         try {
-          await pc.addIceCandidate(candidate);
+          await this.peers[id].addIceCandidate(candidate);
         } catch (err) {
           console.warn("[ICE] Failed to add candidate:", err);
         }
@@ -686,10 +739,10 @@ export class VideoSDKCore {
 
       delete this.pendingIceCandidates[id];
 
-      const answer = await pc.createAnswer();
+      const answer = await this.peers[id].createAnswer();
 
-      await pc.setLocalDescription(answer);
-      await this.flushIce(id, pc);
+      await this.peers[id].setLocalDescription(answer);
+      await this.flushIce(id, this.peers[id]);
 
       this.send({
         type: "ANSWER",
