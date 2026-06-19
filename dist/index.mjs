@@ -6,7 +6,7 @@ import { createContext, useContext, useMemo, useRef } from "react";
 
 // src/config/ws.ts
 var SDK_CONFIG = {
-  wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws"
+  wsUrl: "ws://localhost:8080/ws"
 };
 
 // src/core/MeetingState.ts
@@ -168,8 +168,12 @@ var VideoSDKCore = class {
     this.peers = {};
     this.initiators = /* @__PURE__ */ new Set();
     this.lastPong = Date.now();
+    this.iceServers = [];
     this.intentionalDisconnect = false;
-    this.roomId = null;
+    this.room = {
+      id: null,
+      name: null
+    };
     this.localStream = null;
     this.screenStream = null;
     this.isScreenSharing = false;
@@ -189,7 +193,7 @@ var VideoSDKCore = class {
       code,
       message,
       raw,
-      roomId: this.roomId,
+      roomId: this.room.id,
       userId: this.myId,
       recoverable
     };
@@ -237,7 +241,7 @@ var VideoSDKCore = class {
   }
   // ---------------- CONNECT ----------------
   async connect(roomId, name) {
-    this.roomId = roomId;
+    this.room.id = roomId;
     this.reset();
     return new Promise((resolve, reject) => {
       this.joinResolver = resolve;
@@ -306,8 +310,8 @@ var VideoSDKCore = class {
     await this.connect(roomId, name);
   }
   /** Expose the roomId without making it fully public */
-  getMeetingId() {
-    return this.roomId;
+  getMeeting() {
+    return this.room;
   }
   toggleMic() {
     const mediaState = this.state.localParticipant?.media;
@@ -348,12 +352,12 @@ var VideoSDKCore = class {
     });
   }
   scheduleReconnect() {
-    if (!this.roomId) return;
+    if (!this.room.id) return;
     const delay = Math.min(1e3 * Math.pow(2, this.reconnectAttempts), 3e4);
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = window.setTimeout(async () => {
       try {
-        await this.connect(this.roomId, this.participantName);
+        await this.connect(this.room.id, this.participantName);
         this.reconnectAttempts = 0;
       } catch {
         this.reconnectAttempts++;
@@ -465,6 +469,10 @@ var VideoSDKCore = class {
         }
         break;
       case "JOINED": {
+        if (msg.iceServers) {
+          this.iceServers = msg.iceServers;
+        }
+        this.room.name = msg.room_name;
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
         this.startHeartbeat();
@@ -555,6 +563,11 @@ var VideoSDKCore = class {
   // ---------------- PEER ----------------
   createPeer(id) {
     if (!this.localStream) throw new Error("No local stream");
+    if (!this.iceServers || this.iceServers.length === 0) {
+      throw new Error(
+        "ICE Servers not configured. Backend must provide iceServers on JOIN."
+      );
+    }
     console.log(
       "Adding tracks",
       this.localStream.getTracks().map((t) => ({
@@ -564,30 +577,15 @@ var VideoSDKCore = class {
       }))
     );
     const pc = new RTCPeerConnection({
-      iceServers: [
-        {
-          urls: "stun:stun.relay.metered.ca:80"
-        },
-        {
-          urls: "turn:global.relay.metered.ca:80?transport=tcp",
-          username: "25aed888d2d360e9fae0e812",
-          credential: "WPYstojO9Wf3+HsQ"
-        }
-      ]
+      iceServers: this.iceServers
     });
     pc.ontrack = (event) => {
-      console.log(`\u{1F3A5} Track received from ${id}:`, {
-        kind: event.track.kind,
-        muted: event.track.muted,
-        readyState: event.track.readyState,
-        enabled: event.track.enabled
-      });
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
       const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
       if (event.track.muted) {
         event.track.onunmute = () => {
-          console.log(`\u2705 ${event.track.kind} track unmuted for ${id}`);
+          console.log(`${event.track.kind} track unmuted for ${id}`);
         };
       }
       if (isScreenStream) {
@@ -789,7 +787,7 @@ var VideoSDKCore = class {
       this.send({
         type: "SCREEN_SHARE_START",
         sender: this.myId,
-        room_id: this.roomId,
+        room_id: this.room.id,
         stream_id: this.screenStream.id.replace(/[{}]/g, "")
       });
       return this.screenStream;
@@ -835,7 +833,7 @@ var VideoSDKCore = class {
     this.send({
       type: "SCREEN_SHARE_STOP",
       sender: this.myId,
-      room_id: this.roomId
+      room_id: this.room.id
     });
   }
   sendChatMessage(payload) {
@@ -843,7 +841,7 @@ var VideoSDKCore = class {
       console.warn("WS not connected");
       return;
     }
-    if (!this.roomId) {
+    if (!this.room.id) {
       console.warn("No roomId set");
       return;
     }
@@ -864,7 +862,7 @@ var VideoSDKCore = class {
       message: payload.message.trim(),
       user_id: this.myId,
       sender_name: senderName,
-      room_id: this.roomId,
+      room_id: this.room.id,
       target: isPrivate ? payload.target ?? null : null,
       reply_to: payload.reply_to ?? null,
       client_ts: Date.now()
@@ -885,7 +883,7 @@ var VideoSDKCore = class {
       this.localStream.getTracks().forEach((track) => track.stop());
       this.localStream = null;
     }
-    this.roomId = null;
+    this.room.id = null;
     this.state.localParticipant = null;
     this.state.notify("localParticipant");
     this.state.participants.clear();
@@ -980,7 +978,7 @@ var MeetingProvider = ({
       startScreenShare: sdk.startScreenShare.bind(sdk),
       stopScreenShare: sdk.stopScreenShare.bind(sdk),
       sendMessage: sdk.sendChatMessage.bind(sdk),
-      meetingId: sdk.getMeetingId(),
+      room: sdk.getMeeting(),
       localParticipant,
       participants,
       messages,
@@ -1063,7 +1061,8 @@ var useMeeting = (handlers) => {
     const unsubscribe = ctx.onError(handlers.onError);
     return unsubscribe;
   }, [handlers?.onError]);
-  return ctx;
+  const { sdk: _, ...publicApi } = ctx;
+  return publicApi;
 };
 
 // src/react/useParticipants.ts

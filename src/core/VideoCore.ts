@@ -13,10 +13,14 @@ export class VideoSDKCore {
   private peers: Record<string, RTCPeerConnection> = {};
   private initiators = new Set<string>();
   private lastPong = Date.now();
+  private iceServers: RTCIceServer[] = [];
   private intentionalDisconnect = false;
 
   private myId: string;
-  private roomId: string | null = null;
+  private room: { id: string | null; name: string | null } = {
+    id: null,
+    name: null,
+  };
   private localStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
   private isScreenSharing = false;
@@ -40,7 +44,7 @@ export class VideoSDKCore {
       code,
       message,
       raw,
-      roomId: this.roomId,
+      roomId: this.room.id,
       userId: this.myId,
       recoverable,
     };
@@ -83,7 +87,7 @@ export class VideoSDKCore {
         },
       });
 
-      // ✅ Verify tracks are actually live BEFORE connecting
+      // Verify tracks are actually live BEFORE connecting
       const hasVideo = this.localStream
         .getVideoTracks()
         .some((t) => t.readyState === "live");
@@ -116,7 +120,7 @@ export class VideoSDKCore {
 
   // ---------------- CONNECT ----------------
   async connect(roomId: string, name: string) {
-    this.roomId = roomId;
+    this.room.id = roomId;
 
     this.reset();
 
@@ -205,8 +209,8 @@ export class VideoSDKCore {
   }
 
   /** Expose the roomId without making it fully public */
-  getMeetingId(): string | null {
-    return this.roomId;
+  getMeeting(): { id: string | null; name: string | null } {
+    return this.room;
   }
 
   toggleMic() {
@@ -266,7 +270,7 @@ export class VideoSDKCore {
   }
 
   private scheduleReconnect() {
-    if (!this.roomId) return;
+    if (!this.room.id) return;
 
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
 
@@ -274,7 +278,7 @@ export class VideoSDKCore {
 
     this.reconnectTimer = window.setTimeout(async () => {
       try {
-        await this.connect(this.roomId!, this.participantName);
+        await this.connect(this.room.id!, this.participantName);
 
         this.reconnectAttempts = 0;
       } catch {
@@ -408,6 +412,11 @@ export class VideoSDKCore {
         break;
 
       case "JOINED": {
+        if (msg.iceServers) {
+          this.iceServers = msg.iceServers;
+        }
+        this.room.name = msg.room_name;
+
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
         this.startHeartbeat();
@@ -524,6 +533,12 @@ export class VideoSDKCore {
   // ---------------- PEER ----------------
   private createPeer(id: string) {
     if (!this.localStream) throw new Error("No local stream");
+    if (!this.iceServers || this.iceServers.length === 0) {
+      throw new Error(
+        "ICE Servers not configured. Backend must provide iceServers on JOIN.",
+      );
+    }
+
     console.log(
       "Adding tracks",
       this.localStream.getTracks().map((t) => ({
@@ -534,25 +549,10 @@ export class VideoSDKCore {
     );
 
     const pc = new RTCPeerConnection({
-      iceServers: [
-        {
-          urls: "stun:stun.relay.metered.ca:80",
-        },
-        {
-          urls: "turn:global.relay.metered.ca:80?transport=tcp",
-          username: "25aed888d2d360e9fae0e812",
-          credential: "WPYstojO9Wf3+HsQ",
-        },
-      ],
+      iceServers: this.iceServers,
     });
 
     pc.ontrack = (event) => {
-      console.log(`🎥 Track received from ${id}:`, {
-        kind: event.track.kind,
-        muted: event.track.muted,
-        readyState: event.track.readyState,
-        enabled: event.track.enabled,
-      });
       const incomingStream =
         event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
@@ -560,10 +560,10 @@ export class VideoSDKCore {
       const isScreenStream =
         incomingStream.id === participant?.media?.remoteScreenStreamId;
 
-      // ✅ Handle track unmuting (happens after RTP data starts flowing)
+      // Handle track unmuting (happens after RTP data starts flowing)
       if (event.track.muted) {
         event.track.onunmute = () => {
-          console.log(`✅ ${event.track.kind} track unmuted for ${id}`);
+          console.log(`${event.track.kind} track unmuted for ${id}`);
         };
       }
 
@@ -689,7 +689,7 @@ export class VideoSDKCore {
     const pc = this.peers[id];
 
     try {
-      // ✅ GLARE RECOVERY: Both peers sent OFFERs simultaneously
+      // GLARE RECOVERY: Both peers sent OFFERs simultaneously
       if (pc.signalingState === "have-local-offer") {
         if (this.shouldInitiate(id)) {
           // WE WIN: Keep our offer, reject theirs
@@ -711,7 +711,7 @@ export class VideoSDKCore {
         }
       }
 
-      // ✅ Only set remote description if we're not already in negotiation
+      // Only set remote description if we're not already in negotiation
       if (
         this.peers[id].signalingState !== "stable" &&
         this.peers[id].signalingState !== "have-local-offer"
@@ -826,7 +826,7 @@ export class VideoSDKCore {
       this.send({
         type: "SCREEN_SHARE_START",
         sender: this.myId,
-        room_id: this.roomId,
+        room_id: this.room.id,
         stream_id: this.screenStream.id.replace(/[{}]/g, ""),
       });
 
@@ -884,7 +884,7 @@ export class VideoSDKCore {
     this.send({
       type: "SCREEN_SHARE_STOP",
       sender: this.myId,
-      room_id: this.roomId,
+      room_id: this.room.id,
     });
   }
 
@@ -894,7 +894,7 @@ export class VideoSDKCore {
       return;
     }
 
-    if (!this.roomId) {
+    if (!this.room.id) {
       console.warn("No roomId set");
       return;
     }
@@ -922,7 +922,7 @@ export class VideoSDKCore {
       message: payload.message.trim(),
       user_id: this.myId,
       sender_name: senderName,
-      room_id: this.roomId,
+      room_id: this.room.id,
       target: isPrivate ? (payload.target ?? null) : null,
       reply_to: payload.reply_to ?? null,
 
@@ -950,7 +950,7 @@ export class VideoSDKCore {
       this.localStream = null;
     }
 
-    this.roomId = null;
+    this.room.id = null;
 
     // Clear and notify
     this.state.localParticipant = null;

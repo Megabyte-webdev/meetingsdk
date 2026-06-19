@@ -11,5 +11,6 @@ export const useMeeting = (handlers?: { onError?: (err: any) => void }) => {
     return unsubscribe;
   }, [handlers?.onError]);
 
-  return ctx;
+  const { sdk: _, ...publicApi } = ctx;
+  return publicApi;
 };

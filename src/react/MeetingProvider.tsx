@@ -28,7 +28,7 @@ type MeetingContextValue = {
 
   sendMessage: (input: ChatInput) => void;
 
-  meetingId: string | null;
+  room: { id: string | null; name: string | null };
   localParticipant: Participant | null;
   participants: Map<string, Participant>;
   messages: ChatMessage[];
@@ -100,7 +100,7 @@ export const MeetingProvider = ({
       stopScreenShare: sdk.stopScreenShare.bind(sdk),
       sendMessage: sdk.sendChatMessage.bind(sdk),
 
-      meetingId: sdk.getMeetingId(),
+      room: sdk.getMeeting(),
       localParticipant,
       participants,
       messages,

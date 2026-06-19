@@ -109,9 +109,10 @@ declare class VideoSDKCore {
     private peers;
     private initiators;
     private lastPong;
+    private iceServers;
     private intentionalDisconnect;
     private myId;
-    private roomId;
+    private room;
     private localStream;
     private screenStream;
     private isScreenSharing;
@@ -130,7 +131,10 @@ declare class VideoSDKCore {
     connect(roomId: string, name: string): Promise<void>;
     joinMeeting(config: MeetingConfig): Promise<void>;
     /** Expose the roomId without making it fully public */
-    getMeetingId(): string | null;
+    getMeeting(): {
+        id: string | null;
+        name: string | null;
+    };
     toggleMic(): void;
     toggleCam(): void;
     private scheduleReconnect;
@@ -164,7 +168,10 @@ type MeetingContextValue = {
     startScreenShare: () => Promise<MediaStream>;
     stopScreenShare: () => void;
     sendMessage: (input: ChatInput) => void;
-    meetingId: string | null;
+    room: {
+        id: string | null;
+        name: string | null;
+    };
     localParticipant: Participant | null;
     participants: Map<string, Participant>;
     messages: ChatMessage[];
@@ -181,7 +188,6 @@ declare const useMeetingContext: () => MeetingContextValue;
 declare const useMeeting: (handlers?: {
     onError?: (err: any) => void;
 }) => {
-    sdk: VideoSDKCore;
     join: (config: MeetingConfig) => Promise<void>;
     leave: () => void;
     toggleMic: () => void;
@@ -189,7 +195,10 @@ declare const useMeeting: (handlers?: {
     startScreenShare: () => Promise<MediaStream>;
     stopScreenShare: () => void;
     sendMessage: (input: ChatInput) => void;
-    meetingId: string | null;
+    room: {
+        id: string | null;
+        name: string | null;
+    };
     localParticipant: Participant | null;
     participants: Map<string, Participant>;
     messages: ChatMessage[];
