@@ -17,7 +17,7 @@ type PubSubHandle = {
 type MeetingContextValue = {
   sdk: VideoSDKCore;
 
-  join: (config: MeetingConfig) => Promise<void>;
+  join: (config?: MeetingConfig) => Promise<void>;
   leave: () => void;
 
   toggleMic: () => void;
@@ -34,7 +34,12 @@ type MeetingContextValue = {
   messages: ChatMessage[];
   presenterId: string | null;
   usePubSub: (topic: PubSubTopic) => PubSubHandle;
+  approveJoinRequest: (requestId: string) => void;
+  rejectJoinRequest: (requestId: string) => void;
   onError: (cb: (err: any) => void) => () => void;
+  onEntryRequested: (cb: (req: any) => void) => () => void;
+  onEntryResponded: (cb: (payload: any, decision?: any) => void) => () => void;
+  onMeetingLeft: (cb: () => void) => () => void;
 };
 
 const MeetingContext = createContext<MeetingContextValue | null>(null);
@@ -48,11 +53,20 @@ export const MeetingProvider = ({
 }) => {
   const sdkRef = useRef<VideoSDKCore | null>(null);
   const errorListeners = useRef(new Set<(err: any) => void>());
+  const entryRequestListeners = useRef(new Set<(req: any) => void>());
+  const entryResponseListeners = useRef(
+    new Set<(payload: any, decision?: any) => void>(),
+  );
+  const meetingLeftListeners = useRef(new Set<() => void>());
+
   if (!sdkRef.current) {
     sdkRef.current = new VideoSDKCore({
-      onError: (err) => {
-        errorListeners.current.forEach((fn) => fn(err));
-      },
+      onError: (err) => errorListeners.current.forEach((fn) => fn(err)),
+      onEntryRequested: (req) =>
+        entryRequestListeners.current.forEach((fn) => fn(req)),
+      onEntryResponded: (p, d) =>
+        entryResponseListeners.current.forEach((fn) => fn(p, d)),
+      onMeetingLeft: () => meetingLeftListeners.current.forEach((fn) => fn()),
     });
   }
 
@@ -88,7 +102,7 @@ export const MeetingProvider = ({
     return {
       sdk,
 
-      join: (joinConfig: MeetingConfig) =>
+      join: (joinConfig?: MeetingConfig) =>
         sdk.joinMeeting({
           ...config,
           ...joinConfig,
@@ -114,11 +128,35 @@ export const MeetingProvider = ({
           publish: sdk.sendChatMessage.bind(sdk),
         };
       },
+      approveJoinRequest: sdk.approveJoinRequest.bind(sdk),
+      rejectJoinRequest: sdk.rejectJoinRequest.bind(sdk),
+
       onError: (cb: (err: any) => void) => {
         errorListeners.current.add(cb);
 
         return () => {
           errorListeners.current.delete(cb);
+        };
+      },
+
+      onEntryRequested: (cb: (err: any) => void) => {
+        entryRequestListeners.current.add(cb);
+
+        return () => {
+          entryRequestListeners.current.delete(cb);
+        };
+      },
+      onEntryResponded: (cb: (err: any) => void) => {
+        entryResponseListeners.current.add(cb);
+
+        return () => {
+          entryResponseListeners.current.delete(cb);
+        };
+      },
+      onMeetingLeft: (cb: () => void) => {
+        meetingLeftListeners.current.add(cb);
+        return () => {
+          meetingLeftListeners.current.delete(cb);
         };
       },
     };

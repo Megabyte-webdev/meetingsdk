@@ -440,6 +440,45 @@ export class VideoSDKCore {
         break;
       }
 
+      case "JOIN_PENDING": {
+        const req = msg.request;
+
+        this.events.onEntryRequested?.({
+          requestId: req.id,
+          userId: req.user_id,
+          name: req.name,
+        });
+
+        break;
+      }
+
+      case "JOIN_REQUEST": {
+        const req = msg.request;
+
+        this.events.onEntryRequested?.({
+          requestId: req.id,
+          userId: req.user_id,
+          name: req.name,
+        });
+
+        break;
+      }
+      case "JOIN_APPROVED":
+      case "JOIN_REJECTED": {
+        const decision = msg.type === "JOIN_APPROVED" ? "approved" : "rejected";
+
+        // NEW format
+        this.events.onEntryResponded?.({
+          participantId: msg.user_id,
+          decision,
+        });
+
+        // OLD format compatibility
+        this.events.onEntryResponded?.(msg.user_id, decision);
+
+        break;
+      }
+
       case "USER_LEFT":
         const peerId = msg.participant.id;
         this.closePeer(peerId);
@@ -958,6 +997,7 @@ export class VideoSDKCore {
 
     this.state.participants.clear();
     this.state.notify("participants");
+    this.events.onMeetingLeft?.();
 
     this.state.clearChat();
     this.state.setPresenterId(null);
@@ -980,5 +1020,18 @@ export class VideoSDKCore {
 
   private send(msg: any) {
     this.ws?.send(JSON.stringify(msg));
+  }
+  approveJoinRequest(requestId: string) {
+    this.send({
+      type: "JOIN_APPROVE",
+      request_id: requestId,
+    });
+  }
+
+  rejectJoinRequest(requestId: string) {
+    this.send({
+      type: "JOIN_REJECT",
+      request_id: requestId,
+    });
   }
 }

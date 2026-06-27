@@ -6,7 +6,8 @@ import { createContext, useContext, useMemo, useRef } from "react";
 
 // src/config/ws.ts
 var SDK_CONFIG = {
-  wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws"
+  wsUrl: "ws://localhost:8080/ws"
+  //"wss://rust-video-server-sfyf.onrender.com/ws",
 };
 
 // src/core/MeetingState.ts
@@ -491,6 +492,34 @@ var VideoSDKCore = class {
         }
         break;
       }
+      case "JOIN_PENDING": {
+        const req = msg.request;
+        this.events.onEntryRequested?.({
+          requestId: req.id,
+          userId: req.user_id,
+          name: req.name
+        });
+        break;
+      }
+      case "JOIN_REQUEST": {
+        const req = msg.request;
+        this.events.onEntryRequested?.({
+          requestId: req.id,
+          userId: req.user_id,
+          name: req.name
+        });
+        break;
+      }
+      case "JOIN_APPROVED":
+      case "JOIN_REJECTED": {
+        const decision = msg.type === "JOIN_APPROVED" ? "approved" : "rejected";
+        this.events.onEntryResponded?.({
+          participantId: msg.user_id,
+          decision
+        });
+        this.events.onEntryResponded?.(msg.user_id, decision);
+        break;
+      }
       case "USER_LEFT":
         const peerId = msg.participant.id;
         this.closePeer(peerId);
@@ -888,6 +917,7 @@ var VideoSDKCore = class {
     this.state.notify("localParticipant");
     this.state.participants.clear();
     this.state.notify("participants");
+    this.events.onMeetingLeft?.();
     this.state.clearChat();
     this.state.setPresenterId(null);
   }
@@ -905,6 +935,18 @@ var VideoSDKCore = class {
   }
   send(msg) {
     this.ws?.send(JSON.stringify(msg));
+  }
+  approveJoinRequest(requestId) {
+    this.send({
+      type: "JOIN_APPROVE",
+      request_id: requestId
+    });
+  }
+  rejectJoinRequest(requestId) {
+    this.send({
+      type: "JOIN_REJECT",
+      request_id: requestId
+    });
   }
 };
 
@@ -930,11 +972,17 @@ var MeetingProvider = ({
 }) => {
   const sdkRef = useRef(null);
   const errorListeners = useRef(/* @__PURE__ */ new Set());
+  const entryRequestListeners = useRef(/* @__PURE__ */ new Set());
+  const entryResponseListeners = useRef(
+    /* @__PURE__ */ new Set()
+  );
+  const meetingLeftListeners = useRef(/* @__PURE__ */ new Set());
   if (!sdkRef.current) {
     sdkRef.current = new VideoSDKCore({
-      onError: (err) => {
-        errorListeners.current.forEach((fn) => fn(err));
-      }
+      onError: (err) => errorListeners.current.forEach((fn) => fn(err)),
+      onEntryRequested: (req) => entryRequestListeners.current.forEach((fn) => fn(req)),
+      onEntryResponded: (p, d) => entryResponseListeners.current.forEach((fn) => fn(p, d)),
+      onMeetingLeft: () => meetingLeftListeners.current.forEach((fn) => fn())
     });
   }
   const sdk = sdkRef.current;
@@ -992,10 +1040,30 @@ var MeetingProvider = ({
           publish: sdk.sendChatMessage.bind(sdk)
         };
       },
+      approveJoinRequest: sdk.approveJoinRequest.bind(sdk),
+      rejectJoinRequest: sdk.rejectJoinRequest.bind(sdk),
       onError: (cb) => {
         errorListeners.current.add(cb);
         return () => {
           errorListeners.current.delete(cb);
+        };
+      },
+      onEntryRequested: (cb) => {
+        entryRequestListeners.current.add(cb);
+        return () => {
+          entryRequestListeners.current.delete(cb);
+        };
+      },
+      onEntryResponded: (cb) => {
+        entryResponseListeners.current.add(cb);
+        return () => {
+          entryResponseListeners.current.delete(cb);
+        };
+      },
+      onMeetingLeft: (cb) => {
+        meetingLeftListeners.current.add(cb);
+        return () => {
+          meetingLeftListeners.current.delete(cb);
         };
       }
     };
@@ -1058,9 +1126,20 @@ var useMeeting = (handlers) => {
   const ctx = useMeetingContext();
   useEffect3(() => {
     if (!handlers?.onError) return;
-    const unsubscribe = ctx.onError(handlers.onError);
-    return unsubscribe;
+    return ctx.onError(handlers.onError);
   }, [handlers?.onError]);
+  useEffect3(() => {
+    if (!handlers?.onEntryRequested) return;
+    return ctx.onEntryRequested(handlers.onEntryRequested);
+  }, [handlers?.onEntryRequested]);
+  useEffect3(() => {
+    if (!handlers?.onEntryResponded) return;
+    return ctx.onEntryResponded(handlers.onEntryResponded);
+  }, [handlers?.onEntryResponded]);
+  useEffect3(() => {
+    if (!handlers?.onMeetingLeft) return;
+    return ctx.onMeetingLeft(handlers.onMeetingLeft);
+  }, [handlers?.onMeetingLeft]);
   const { sdk: _, ...publicApi } = ctx;
   return publicApi;
 };

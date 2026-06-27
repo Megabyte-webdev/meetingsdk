@@ -9,7 +9,15 @@ type Events = {
     onTrack?: (stream: MediaStream, peerId: string) => void;
     onScreenTrack?: (stream: MediaStream, peerId: string) => void;
     onUserJoined?: (p: Participant) => void;
+    onEntryRequested?: (req: EntryRequest) => void;
+    onEntryResponded?: (payload: {
+        participantId: string;
+        decision: EntryDecision;
+    } | string, decision?: EntryDecision) => void;
+    onJoinApproved?: (requestId: string) => void;
+    onJoinRejected?: (requestId: string) => void;
     onUserLeft?: (id: string) => void;
+    onMeetingLeft?: () => void;
     onChatMessage?: (msg: ChatMessage) => void;
     onScreenShareStarted?: (peerId: string, stream: MediaStream) => void;
     onScreenShareStopped?: (peerId: string) => void;
@@ -68,6 +76,12 @@ type SDKError = {
     userId?: string;
     raw?: any;
     recoverable?: boolean;
+};
+type EntryDecision = "approved" | "rejected";
+type EntryRequest = {
+    requestId: string;
+    userId: string;
+    name: string;
 };
 
 declare const useLocalParticipant: () => {
@@ -153,6 +167,8 @@ declare class VideoSDKCore {
     disconnect(): void;
     private flushIce;
     private send;
+    approveJoinRequest(requestId: string): void;
+    rejectJoinRequest(requestId: string): void;
 }
 
 type PubSubHandle = {
@@ -161,7 +177,7 @@ type PubSubHandle = {
 };
 type MeetingContextValue = {
     sdk: VideoSDKCore;
-    join: (config: MeetingConfig) => Promise<void>;
+    join: (config?: MeetingConfig) => Promise<void>;
     leave: () => void;
     toggleMic: () => void;
     toggleCam: () => void;
@@ -177,7 +193,12 @@ type MeetingContextValue = {
     messages: ChatMessage[];
     presenterId: string | null;
     usePubSub: (topic: PubSubTopic) => PubSubHandle;
+    approveJoinRequest: (requestId: string) => void;
+    rejectJoinRequest: (requestId: string) => void;
     onError: (cb: (err: any) => void) => () => void;
+    onEntryRequested: (cb: (req: any) => void) => () => void;
+    onEntryResponded: (cb: (payload: any, decision?: any) => void) => () => void;
+    onMeetingLeft: (cb: () => void) => () => void;
 };
 declare const MeetingProvider: ({ config, children, }: {
     config: MeetingConfig;
@@ -187,8 +208,11 @@ declare const useMeetingContext: () => MeetingContextValue;
 
 declare const useMeeting: (handlers?: {
     onError?: (err: any) => void;
+    onEntryRequested?: (req: any) => void;
+    onEntryResponded?: (payload: any, decision?: any) => void;
+    onMeetingLeft?: () => void;
 }) => {
-    join: (config: MeetingConfig) => Promise<void>;
+    join: (config?: MeetingConfig) => Promise<void>;
     leave: () => void;
     toggleMic: () => void;
     toggleCam: () => void;
@@ -207,7 +231,12 @@ declare const useMeeting: (handlers?: {
         messages: ChatMessage[];
         publish: (input: ChatInput) => void;
     };
+    approveJoinRequest: (requestId: string) => void;
+    rejectJoinRequest: (requestId: string) => void;
     onError: (cb: (err: any) => void) => () => void;
+    onEntryRequested: (cb: (req: any) => void) => () => void;
+    onEntryResponded: (cb: (payload: any, decision?: any) => void) => () => void;
+    onMeetingLeft: (cb: () => void) => () => void;
 };
 
 declare const useParticipants: () => Participant[];

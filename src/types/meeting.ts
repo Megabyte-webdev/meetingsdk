@@ -5,7 +5,18 @@ export type Events = {
   onTrack?: (stream: MediaStream, peerId: string) => void;
   onScreenTrack?: (stream: MediaStream, peerId: string) => void;
   onUserJoined?: (p: Participant) => void;
+  onEntryRequested?: (req: EntryRequest) => void;
+
+  onEntryResponded?: (
+    payload: { participantId: string; decision: EntryDecision } | string,
+    decision?: EntryDecision,
+  ) => void;
+
+  onJoinApproved?: (requestId: string) => void;
+  onJoinRejected?: (requestId: string) => void;
+
   onUserLeft?: (id: string) => void;
+  onMeetingLeft?: () => void;
   onChatMessage?: (msg: ChatMessage) => void;
   onScreenShareStarted?: (peerId: string, stream: MediaStream) => void;
   onScreenShareStopped?: (peerId: string) => void;
@@ -81,4 +92,12 @@ export type SDKError = {
   userId?: string;
   raw?: any;
   recoverable?: boolean;
+};
+
+export type EntryDecision = "approved" | "rejected";
+
+export type EntryRequest = {
+  requestId: string;
+  userId: string;
+  name: string;
 };
