@@ -34,6 +34,11 @@ export class VideoSDKCore {
   public readonly state: MeetingState;
   private joinResolver?: () => void;
   private joinRejecter?: (e: any) => void;
+
+  // Track if we're in the waiting room (pending approval)
+  private isWaitingForApproval = false;
+  private pendingRequestId: string | null = null;
+
   private emitError(
     code: string,
     message: string,
@@ -130,6 +135,7 @@ export class VideoSDKCore {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
+        console.log("WebSocket connected, sending JOIN...");
         this.send({
           type: "JOIN",
           room_id: roomId,
@@ -156,6 +162,12 @@ export class VideoSDKCore {
         }
 
         if (e.code === 1000 || e.code === 1001) {
+          return;
+        }
+
+        // Don't auto-reconnect if waiting for approval (user must reconnect after approval)
+        if (this.isWaitingForApproval) {
+          console.log("Waiting for approval, not auto-reconnecting");
           return;
         }
 
@@ -208,7 +220,6 @@ export class VideoSDKCore {
     await this.connect(roomId, name);
   }
 
-  /** Expose the roomId without making it fully public */
   getMeeting(): { id: string | null; name: string | null } {
     return this.room;
   }
@@ -318,7 +329,44 @@ export class VideoSDKCore {
     this.state.resetRemoteState();
   }
 
-  // ---------------- HANDLE SIGNALS ----------------
+  private async handleJoinApproved(msg: any) {
+    console.log(
+      "JOIN_APPROVED received, closing old WebSocket and reconnecting...",
+    );
+
+    // Notify UI that approval was received
+    this.events.onEntryResponded?.({
+      participantId: msg.user_id,
+      decision: "approved",
+    });
+
+    this.isWaitingForApproval = false;
+    this.pendingRequestId = null;
+
+    if (this.ws) {
+      this.ws.onclose = null; // Prevent reconnect on close
+      this.ws.close();
+      this.ws = null;
+    }
+
+    // Wait a moment, then reconnect with a NEW WebSocket
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    try {
+      console.log("🔌 Opening fresh WebSocket to join meeting...");
+      await this.connect(this.room.id!, this.participantName);
+      console.log("Reconnected and joining meeting!");
+    } catch (err) {
+      console.error("Failed to reconnect after approval:", err);
+      this.emitError(
+        "RECONNECT_FAILED",
+        "Failed to reconnect after approval",
+        err,
+        true,
+      );
+    }
+  }
+
   private async handle(msg: any) {
     if (msg.sender === this.myId) return;
 
@@ -417,6 +465,8 @@ export class VideoSDKCore {
         }
         this.room.name = msg.room_name;
 
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
         this.startHeartbeat();
@@ -443,6 +493,10 @@ export class VideoSDKCore {
       case "JOIN_PENDING": {
         const req = msg.request;
 
+        console.log("JOIN_PENDING - waiting for host approval");
+        this.isWaitingForApproval = true;
+        this.pendingRequestId = req.id;
+
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -455,6 +509,8 @@ export class VideoSDKCore {
       case "JOIN_REQUEST": {
         const req = msg.request;
 
+        console.log("JOIN_REQUEST - show to host for approval");
+
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -463,18 +519,25 @@ export class VideoSDKCore {
 
         break;
       }
-      case "JOIN_APPROVED":
-      case "JOIN_REJECTED": {
-        const decision = msg.type === "JOIN_APPROVED" ? "approved" : "rejected";
 
-        // NEW format
+      // ============ NEW: HANDLE JOIN_APPROVED WITH RECONNECT ============
+      case "JOIN_APPROVED": {
+        await this.handleJoinApproved(msg);
+        break;
+      }
+      // ============ END: JOIN_APPROVED ============
+
+      case "JOIN_REJECTED": {
+        const decision = "rejected";
+
+        console.log("JOIN_REJECTED - user not allowed to join");
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
+
         this.events.onEntryResponded?.({
           participantId: msg.user_id,
           decision,
         });
-
-        // OLD format compatibility
-        this.events.onEntryResponded?.(msg.user_id, decision);
 
         break;
       }
@@ -678,7 +741,7 @@ export class VideoSDKCore {
       console.debug(
         `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`,
       );
-      return; // ← Actually return!
+      return;
     }
 
     if (!isRenegotiation && this.initiators.has(id)) {
@@ -735,7 +798,7 @@ export class VideoSDKCore {
           console.warn(
             `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`,
           );
-          return; // ← Ignore their offer, wait for their ANSWER
+          return; // Ignore their offer, wait for their ANSWER
         } else {
           // THEY WIN: Roll back and accept their offer
           console.warn(
@@ -1021,6 +1084,7 @@ export class VideoSDKCore {
   private send(msg: any) {
     this.ws?.send(JSON.stringify(msg));
   }
+
   approveJoinRequest(requestId: string) {
     this.send({
       type: "JOIN_APPROVE",

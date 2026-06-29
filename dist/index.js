@@ -39,8 +39,7 @@ var import_react2 = require("react");
 
 // src/config/ws.ts
 var SDK_CONFIG = {
-  wsUrl: "ws://localhost:8080/ws"
-  //"wss://rust-video-server-sfyf.onrender.com/ws",
+  wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws"
 };
 
 // src/core/MeetingState.ts
