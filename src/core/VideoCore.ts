@@ -1034,6 +1034,7 @@ export class VideoSDKCore {
 
   disconnect() {
     this.intentionalDisconnect = true;
+
     this.stopScreenShare();
 
     Object.values(this.peers).forEach((pc) => pc.close());
@@ -1042,9 +1043,19 @@ export class VideoSDKCore {
 
     this.stopHeartbeat();
 
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({
+        type: "LEAVE",
+        room_id: this.room.id,
+        user_id: this.myId,
+        sender_name: this.state.localParticipant?.name,
+      });
+
+      // Allow the LEAVE frame to be flushed.
+      setTimeout(() => {
+        this.ws?.close(1000, "Leaving meeting");
+        this.ws = null;
+      }, 50);
     }
 
     if (this.localStream) {
@@ -1054,12 +1065,12 @@ export class VideoSDKCore {
 
     this.room.id = null;
 
-    // Clear and notify
     this.state.localParticipant = null;
     this.state.notify("localParticipant");
 
     this.state.participants.clear();
     this.state.notify("participants");
+
     this.events.onMeetingLeft?.();
 
     this.state.clearChat();

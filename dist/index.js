@@ -215,6 +215,9 @@ var VideoSDKCore = class {
     this.pendingIceCandidates = {};
     this.reconnectAttempts = 0;
     this.participantName = "";
+    // Track if we're in the waiting room (pending approval)
+    this.isWaitingForApproval = false;
+    this.pendingRequestId = null;
     this.state = new MeetingState();
     this.events = events;
     this.url = url;
@@ -281,6 +284,7 @@ var VideoSDKCore = class {
       this.joinRejecter = reject;
       this.ws = new WebSocket(this.url);
       this.ws.onopen = () => {
+        console.log("WebSocket connected, sending JOIN...");
         this.send({
           type: "JOIN",
           room_id: roomId,
@@ -302,6 +306,10 @@ var VideoSDKCore = class {
           return;
         }
         if (e.code === 1e3 || e.code === 1001) {
+          return;
+        }
+        if (this.isWaitingForApproval) {
+          console.log("Waiting for approval, not auto-reconnecting");
           return;
         }
         this.scheduleReconnect();
@@ -342,7 +350,6 @@ var VideoSDKCore = class {
     this.state.localStream = this.localStream;
     await this.connect(roomId, name);
   }
-  /** Expose the roomId without making it fully public */
   getMeeting() {
     return this.room;
   }
@@ -422,7 +429,36 @@ var VideoSDKCore = class {
     this.pendingIceCandidates = {};
     this.state.resetRemoteState();
   }
-  // ---------------- HANDLE SIGNALS ----------------
+  async handleJoinApproved(msg) {
+    console.log(
+      "JOIN_APPROVED received, closing old WebSocket and reconnecting..."
+    );
+    this.events.onEntryResponded?.({
+      participantId: msg.user_id,
+      decision: "approved"
+    });
+    this.isWaitingForApproval = false;
+    this.pendingRequestId = null;
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.close();
+      this.ws = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      console.log("\u{1F50C} Opening fresh WebSocket to join meeting...");
+      await this.connect(this.room.id, this.participantName);
+      console.log("Reconnected and joining meeting!");
+    } catch (err) {
+      console.error("Failed to reconnect after approval:", err);
+      this.emitError(
+        "RECONNECT_FAILED",
+        "Failed to reconnect after approval",
+        err,
+        true
+      );
+    }
+  }
   async handle(msg) {
     var _a, _b, _c, _d;
     if (msg.sender === this.myId) return;
@@ -506,6 +542,8 @@ var VideoSDKCore = class {
           this.iceServers = msg.iceServers;
         }
         this.room.name = msg.room_name;
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
         this.startHeartbeat();
@@ -526,6 +564,9 @@ var VideoSDKCore = class {
       }
       case "JOIN_PENDING": {
         const req = msg.request;
+        console.log("JOIN_PENDING - waiting for host approval");
+        this.isWaitingForApproval = true;
+        this.pendingRequestId = req.id;
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -535,6 +576,7 @@ var VideoSDKCore = class {
       }
       case "JOIN_REQUEST": {
         const req = msg.request;
+        console.log("JOIN_REQUEST - show to host for approval");
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -542,14 +584,21 @@ var VideoSDKCore = class {
         });
         break;
       }
-      case "JOIN_APPROVED":
+      // ============ NEW: HANDLE JOIN_APPROVED WITH RECONNECT ============
+      case "JOIN_APPROVED": {
+        await this.handleJoinApproved(msg);
+        break;
+      }
+      // ============ END: JOIN_APPROVED ============
       case "JOIN_REJECTED": {
-        const decision = msg.type === "JOIN_APPROVED" ? "approved" : "rejected";
+        const decision = "rejected";
+        console.log("JOIN_REJECTED - user not allowed to join");
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
         this.events.onEntryResponded?.({
           participantId: msg.user_id,
           decision
         });
-        this.events.onEntryResponded?.(msg.user_id, decision);
         break;
       }
       case "USER_LEFT":
@@ -936,9 +985,17 @@ var VideoSDKCore = class {
     this.peers = {};
     this.initiators.clear();
     this.stopHeartbeat();
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({
+        type: "LEAVE",
+        room_id: this.room.id,
+        user_id: this.myId,
+        sender_name: this.state.localParticipant?.name
+      });
+      setTimeout(() => {
+        this.ws?.close(1e3, "Leaving meeting");
+        this.ws = null;
+      }, 50);
     }
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => track.stop());
