@@ -330,11 +330,8 @@ export class VideoSDKCore {
   }
 
   private async handleJoinApproved(msg: any) {
-    console.log(
-      "JOIN_APPROVED received, closing old WebSocket and reconnecting...",
-    );
+    console.log("JOIN_APPROVED received, reconnecting...");
 
-    // Notify UI that approval was received
     this.events.onEntryResponded?.({
       participantId: msg.user_id,
       decision: "approved",
@@ -343,19 +340,33 @@ export class VideoSDKCore {
     this.isWaitingForApproval = false;
     this.pendingRequestId = null;
 
+    // Clean up OLD socket completely
+    this.stopHeartbeat();
+
     if (this.ws) {
-      this.ws.onclose = null; // Prevent reconnect on close
-      this.ws.close();
-      this.ws = null;
+      const oldWs = this.ws;
+      this.ws = null; // Clear reference first
+
+      // Remove ALL handlers to prevent race conditions
+      oldWs.onopen = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      oldWs.onmessage = null;
+
+      oldWs.close(1000, "Approved, reconnecting");
     }
 
-    // Wait a moment, then reconnect with a NEW WebSocket
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Clear any pending reconnect timers
+    clearTimeout(this.reconnectTimer);
+    this.reconnectAttempts = 0;
+
+    // Wait for socket to fully die
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     try {
-      console.log("🔌 Opening fresh WebSocket to join meeting...");
+      console.log("🔌 Opening fresh WebSocket after approval...");
       await this.connect(this.room.id!, this.participantName);
-      console.log("Reconnected and joining meeting!");
+      console.log("Successfully joined after approval!");
     } catch (err) {
       console.error("Failed to reconnect after approval:", err);
       this.emitError(

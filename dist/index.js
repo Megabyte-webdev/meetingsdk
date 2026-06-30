@@ -430,25 +430,30 @@ var VideoSDKCore = class {
     this.state.resetRemoteState();
   }
   async handleJoinApproved(msg) {
-    console.log(
-      "JOIN_APPROVED received, closing old WebSocket and reconnecting..."
-    );
+    console.log("JOIN_APPROVED received, reconnecting...");
     this.events.onEntryResponded?.({
       participantId: msg.user_id,
       decision: "approved"
     });
     this.isWaitingForApproval = false;
     this.pendingRequestId = null;
+    this.stopHeartbeat();
     if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.close();
+      const oldWs = this.ws;
       this.ws = null;
+      oldWs.onopen = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      oldWs.onmessage = null;
+      oldWs.close(1e3, "Approved, reconnecting");
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    clearTimeout(this.reconnectTimer);
+    this.reconnectAttempts = 0;
+    await new Promise((resolve) => setTimeout(resolve, 300));
     try {
-      console.log("\u{1F50C} Opening fresh WebSocket to join meeting...");
+      console.log("\u{1F50C} Opening fresh WebSocket after approval...");
       await this.connect(this.room.id, this.participantName);
-      console.log("Reconnected and joining meeting!");
+      console.log("Successfully joined after approval!");
     } catch (err) {
       console.error("Failed to reconnect after approval:", err);
       this.emitError(
