@@ -139,12 +139,13 @@ declare class VideoSDKCore {
     readonly state: MeetingState;
     private joinResolver?;
     private joinRejecter?;
+    private isWaitingForApproval;
+    private pendingRequestId;
     private emitError;
     constructor(events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
     connect(roomId: string, name: string): Promise<void>;
     joinMeeting(config: MeetingConfig): Promise<void>;
-    /** Expose the roomId without making it fully public */
     getMeeting(): {
         id: string | null;
         name: string | null;
@@ -155,6 +156,7 @@ declare class VideoSDKCore {
     private startHeartbeat;
     private stopHeartbeat;
     private reset;
+    private handleJoinApproved;
     private handle;
     private createPeer;
     private createOffer;
