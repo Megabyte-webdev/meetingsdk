@@ -480,10 +480,10 @@ export class VideoSDKCore {
 
         console.log("JOIN_PENDING - waiting for host approval");
         this.isWaitingForApproval = true;
-        this.pendingRequestId = req.id;
+        this.pendingRequestId = req.request_id;
 
         this.events.onEntryRequested?.({
-          requestId: req.id,
+          requestId: req.request_id,
           userId: req.user_id,
           name: req.name,
         });
