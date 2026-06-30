@@ -133,6 +133,7 @@ declare class VideoSDKCore {
     private screenSenders;
     private pingInterval;
     private pendingIceCandidates;
+    private pendingOffers;
     private reconnectAttempts;
     private reconnectTimer?;
     private participantName;

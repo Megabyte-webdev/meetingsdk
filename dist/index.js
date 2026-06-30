@@ -213,6 +213,7 @@ var VideoSDKCore = class {
     this.screenSenders = {};
     this.pingInterval = null;
     this.pendingIceCandidates = {};
+    this.pendingOffers = {};
     this.reconnectAttempts = 0;
     this.participantName = "";
     // Track if we're in the waiting room (pending approval)
@@ -534,6 +535,18 @@ var VideoSDKCore = class {
         this.pendingRequestId = null;
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
+        if (Object.keys(this.pendingOffers).length > 0) {
+          console.log(
+            "Processing",
+            Object.keys(this.pendingOffers).length,
+            "pending offers"
+          );
+          for (const [peerId2, sdp] of Object.entries(this.pendingOffers)) {
+            console.log("Handling queued offer from", peerId2);
+            await this.handleOffer(sdp, peerId2);
+          }
+          this.pendingOffers = {};
+        }
         this.startHeartbeat();
         this.joinResolver?.();
         this.joinResolver = void 0;
@@ -778,6 +791,11 @@ var VideoSDKCore = class {
   }
   // ---------------- ANSWER ----------------
   async handleOffer(sdp, id) {
+    if (!this.iceServers || this.iceServers.length === 0) {
+      console.warn("[Offer] Waiting for iceServers, queuing offer from", id);
+      this.pendingOffers[id] = sdp;
+      return;
+    }
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }

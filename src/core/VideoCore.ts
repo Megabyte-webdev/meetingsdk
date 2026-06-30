@@ -28,6 +28,7 @@ export class VideoSDKCore {
 
   private pingInterval: any = null;
   private pendingIceCandidates: Record<string, RTCIceCandidateInit[]> = {};
+  private pendingOffers: Record<string, string> = {};
   private reconnectAttempts = 0;
   private reconnectTimer?: number;
   private participantName = "";
@@ -454,6 +455,20 @@ export class VideoSDKCore {
         this.pendingRequestId = null;
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
+
+        // Process any OFFERs that arrived before JOINED
+        if (Object.keys(this.pendingOffers).length > 0) {
+          console.log(
+            "Processing",
+            Object.keys(this.pendingOffers).length,
+            "pending offers",
+          );
+          for (const [peerId, sdp] of Object.entries(this.pendingOffers)) {
+            console.log("Handling queued offer from", peerId);
+            await this.handleOffer(sdp, peerId);
+          }
+          this.pendingOffers = {};
+        }
         this.startHeartbeat();
         this.joinResolver?.();
         this.joinResolver = undefined;
@@ -769,6 +784,12 @@ export class VideoSDKCore {
 
   // ---------------- ANSWER ----------------
   private async handleOffer(sdp: string, id: string) {
+    if (!this.iceServers || this.iceServers.length === 0) {
+      console.warn("[Offer] Waiting for iceServers, queuing offer from", id);
+      this.pendingOffers[id] = sdp;
+      return;
+    }
+
     if (!this.peers[id]) {
       this.peers[id] = this.createPeer(id);
     }
