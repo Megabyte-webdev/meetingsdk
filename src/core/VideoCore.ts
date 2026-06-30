@@ -330,7 +330,7 @@ export class VideoSDKCore {
   }
 
   private async handleJoinApproved(msg: any) {
-    console.log("JOIN_APPROVED received, reconnecting...");
+    console.log("JOIN_APPROVED received, sending new JOIN...");
 
     this.events.onEntryResponded?.({
       participantId: msg.user_id,
@@ -340,41 +340,15 @@ export class VideoSDKCore {
     this.isWaitingForApproval = false;
     this.pendingRequestId = null;
 
-    // Clean up OLD socket completely
-    this.stopHeartbeat();
-
-    if (this.ws) {
-      const oldWs = this.ws;
-      this.ws = null; // Clear reference first
-
-      // Remove ALL handlers to prevent race conditions
-      oldWs.onopen = null;
-      oldWs.onclose = null;
-      oldWs.onerror = null;
-      oldWs.onmessage = null;
-
-      oldWs.close(1000, "Approved, reconnecting");
-    }
-
-    // Clear any pending reconnect timers
-    clearTimeout(this.reconnectTimer);
-    this.reconnectAttempts = 0;
-
-    // Wait for socket to fully die
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    try {
-      console.log("🔌 Opening fresh WebSocket after approval...");
-      await this.connect(this.room.id!, this.participantName);
-      console.log("Successfully joined after approval!");
-    } catch (err) {
-      console.error("Failed to reconnect after approval:", err);
-      this.emitError(
-        "RECONNECT_FAILED",
-        "Failed to reconnect after approval",
-        err,
-        true,
-      );
+    // Send JOIN again on SAME socket
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.send({
+        type: "JOIN",
+        room_id: this.room.id,
+        user_id: this.myId,
+        sender_name: this.participantName,
+      });
+      console.log("Sent new JOIN after approval");
     }
   }
 
