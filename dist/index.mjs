@@ -177,8 +177,7 @@ var VideoSDKCore = class {
     this.localStream = null;
     this.screenStream = null;
     this.isScreenSharing = false;
-    // Transceiver-based tracking: maps peerId -> { cameraTransceiver, screenTransceiver, screenMid }
-    this.peerTransceivers = {};
+    this.screenSenders = {};
     this.pingInterval = null;
     this.pendingIceCandidates = {};
     this.pendingOffers = {};
@@ -207,7 +206,7 @@ var VideoSDKCore = class {
     this.joinRejecter = void 0;
     console.error("[MeetingSDK Error]", err);
   }
-  // STREAM
+  // ---------------- STREAM ----------------
   async initLocal(video, name) {
     this.participantName = name;
     try {
@@ -244,7 +243,7 @@ var VideoSDKCore = class {
       throw err;
     }
   }
-  // CONNECT
+  // ---------------- CONNECT ----------------
   async connect(roomId, name) {
     this.room.id = roomId;
     this.reset();
@@ -390,11 +389,10 @@ var VideoSDKCore = class {
       this.pingInterval = null;
     }
   }
-  // RESET
+  // ---------------- RESET ----------------
   reset() {
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
-    this.peerTransceivers = {};
     this.initiators.clear();
     this.pendingIceCandidates = {};
     this.state.resetRemoteState();
@@ -449,7 +447,6 @@ var VideoSDKCore = class {
             type: "answer",
             sdp: msg.payload
           });
-          this.captureScreenMid(msg.sender);
           await this.flushIce(msg.sender, pc);
         } catch (err) {
           console.error("[Signaling] Failed to apply answer:", err);
@@ -486,6 +483,7 @@ var VideoSDKCore = class {
         if (msg.presenterId) {
           this.state.setPresenterId(msg.presenterId);
           this.events.onScreenShareStarted?.(msg.presenterId, null);
+          this.state.setPresenterId(msg.presenterId);
         }
         for (const p of msg.participants || []) {
           if (!p?.id || p.id === this.myId) continue;
@@ -568,10 +566,12 @@ var VideoSDKCore = class {
         });
         break;
       }
+      // ============ NEW: HANDLE JOIN_APPROVED WITH RECONNECT ============
       case "JOIN_APPROVED": {
         await this.handleJoinApproved(msg);
         break;
       }
+      // ============ END: JOIN_APPROVED ============
       case "JOIN_REJECTED": {
         const decision = "rejected";
         console.log("JOIN_REJECTED - user not allowed to join");
@@ -624,7 +624,8 @@ var VideoSDKCore = class {
         if (!this.state.presenterId) {
           this.state.setPresenterId(peerId2);
         }
-        this.events.onScreenShareStarted?.(peerId2, null);
+        const screenStream = this.state.getParticipant(peerId2)?.media?.screenStream;
+        this.events.onScreenShareStarted?.(peerId2, screenStream || null);
         break;
       }
       case "SCREEN_SHARE_STOP": {
@@ -651,7 +652,8 @@ var VideoSDKCore = class {
       }
     }
   }
-  async createPeer(id) {
+  // ---------------- PEER ----------------
+  createPeer(id) {
     if (!this.localStream) throw new Error("No local stream");
     if (!this.iceServers || this.iceServers.length === 0) {
       throw new Error(
@@ -659,9 +661,7 @@ var VideoSDKCore = class {
       );
     }
     console.log(
-      "Creating peer connection for",
-      id,
-      "with tracks:",
+      "Adding tracks",
       this.localStream.getTracks().map((t) => ({
         kind: t.kind,
         enabled: t.enabled,
@@ -671,52 +671,25 @@ var VideoSDKCore = class {
     const pc = new RTCPeerConnection({
       iceServers: this.iceServers
     });
-    const audioTransceiver = pc.addTransceiver("audio", {
-      direction: "sendrecv"
-    });
-    const audioTrack = this.localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      await audioTransceiver.sender.replaceTrack(audioTrack);
-    }
-    const cameraTransceiver = pc.addTransceiver("video", {
-      direction: "sendrecv"
-    });
-    const videoTrack = this.localStream.getVideoTracks()[0];
-    if (videoTrack) {
-      await cameraTransceiver.sender.replaceTrack(videoTrack);
-    }
-    const screenTransceiver = pc.addTransceiver("video", {
-      direction: this.isScreenSharing ? "sendrecv" : "recvonly"
-    });
-    if (this.isScreenSharing && this.screenStream) {
-      const screenTrack = this.screenStream.getVideoTracks()[0];
-      if (screenTrack) {
-        await screenTransceiver.sender.replaceTrack(screenTrack);
-      }
-    }
-    this.peerTransceivers[id] = {
-      cameraTransceiver,
-      screenTransceiver,
-      screenMid: null
-      // will be populated after negotiation
-    };
     pc.ontrack = (event) => {
-      const transceiver = event.transceiver;
-      const isScreenTrack = transceiver === this.peerTransceivers[id]?.screenTransceiver;
-      console.log(
-        `[ontrack] ${id}: kind=${event.track.kind}, mid=${transceiver.mid}, isScreen=${isScreenTrack}`
-      );
+      console.log("ontrack");
+      console.log("kind:", event.track.kind);
+      console.log("mid:", event.transceiver.mid);
+      console.log("streams:", event.streams);
+      console.log("stream id:", event.streams[0]?.id);
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
+      const participant = this.state.getParticipant(id);
+      const isScreenStream = participant?.media?.isScreenSharing && incomingStream.id === participant?.media?.remoteScreenStreamId;
       if (event.track.muted) {
         event.track.onunmute = () => {
-          console.log(`[ontrack] ${event.track.kind} track unmuted for ${id}`);
+          console.log(`${event.track.kind} track unmuted for ${id}`);
         };
       }
-      if (isScreenTrack) {
-        const videoTrack2 = event.track.kind === "video" ? event.track : incomingStream.getVideoTracks()[0];
+      if (isScreenStream) {
+        const videoTrack = event.track.kind === "video" ? event.track : incomingStream.getVideoTracks()[0] || participant?.media?.screenTrack;
         this.state.updateParticipantMedia(id, {
           screenStream: incomingStream,
-          screenTrack: videoTrack2,
+          screenTrack: videoTrack,
           isScreenSharing: true
         });
         if (!this.state.presenterId) {
@@ -742,41 +715,29 @@ var VideoSDKCore = class {
       });
     };
     pc.oniceconnectionstatechange = () => {
-      console.log(`[ICE Connection] ${id}: ${pc.iceConnectionState}`);
+      console.log(`ICE Connection State: ${pc.iceConnectionState}`);
     };
     pc.onconnectionstatechange = () => {
-      console.log(`[Connection] ${id}: ${pc.connectionState}`);
       if (pc.connectionState === "failed") {
         try {
           pc.restartIce();
-        } catch (e) {
-          console.warn("Failed to restart ICE:", e);
+        } catch {
         }
       }
     };
+    this.localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, this.localStream);
+    });
+    if (this.isScreenSharing && this.screenStream) {
+      this.screenSenders[id] = [];
+      this.screenStream.getTracks().forEach((track) => {
+        const sender = pc.addTrack(track, this.screenStream);
+        this.screenSenders[id].push(sender);
+      });
+    }
     return pc;
   }
-  /**
-   * Capture the screen transceiver's MID after SDP negotiation completes.
-   * The MID is assigned during negotiation and is stable for the life of the connection.
-   */
-  captureScreenMid(peerId) {
-    const pc = this.peers[peerId];
-    if (!pc) return;
-    const transceivers = pc.getTransceivers();
-    const screenTransceiver = this.peerTransceivers[peerId]?.screenTransceiver;
-    if (!screenTransceiver) return;
-    const negotiatedTransceiver = transceivers.find(
-      (t) => t === screenTransceiver
-    );
-    if (negotiatedTransceiver?.mid) {
-      this.peerTransceivers[peerId].screenMid = negotiatedTransceiver.mid;
-      console.log(
-        `[Negotiation] Captured screenMid for ${peerId}: ${negotiatedTransceiver.mid}`
-      );
-    }
-  }
-  // OFFER
+  // ---------------- OFFER ----------------
   async createOffer(id, isRenegotiation = false) {
     if (!isRenegotiation && !this.shouldInitiate(id)) {
       console.debug(
@@ -794,13 +755,12 @@ var VideoSDKCore = class {
       this.initiators.add(id);
     }
     if (!this.peers[id]) {
-      this.peers[id] = await this.createPeer(id);
+      this.peers[id] = this.createPeer(id);
     }
     const pc = this.peers[id];
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      this.captureScreenMid(id);
       this.send({
         type: "OFFER",
         payload: offer.sdp,
@@ -810,18 +770,12 @@ var VideoSDKCore = class {
       console.debug(`[Offer] Sent to ${id}`);
     } catch (err) {
       console.error(`[Offer] Failed for ${id}:`, err);
-      this.emitError(
-        "OFFER_CREATION_FAILED",
-        `Failed to create offer for ${id}`,
-        err,
-        true
-      );
     }
   }
   shouldInitiate(peerId) {
     return this.myId < peerId;
   }
-  // ANSWER
+  // ---------------- ANSWER ----------------
   async handleOffer(sdp, id) {
     if (!this.iceServers || this.iceServers.length === 0) {
       console.warn("[Offer] Waiting for iceServers, queuing offer from", id);
@@ -829,7 +783,7 @@ var VideoSDKCore = class {
       return;
     }
     if (!this.peers[id]) {
-      this.peers[id] = await this.createPeer(id);
+      this.peers[id] = this.createPeer(id);
     }
     const pc = this.peers[id];
     try {
@@ -845,9 +799,8 @@ var VideoSDKCore = class {
           );
           pc.close();
           delete this.peers[id];
-          delete this.peerTransceivers[id];
           this.initiators.delete(id);
-          this.peers[id] = await this.createPeer(id);
+          this.peers[id] = this.createPeer(id);
         }
       }
       if (this.peers[id].signalingState !== "stable" && this.peers[id].signalingState !== "have-local-offer") {
@@ -860,7 +813,6 @@ var VideoSDKCore = class {
         type: "offer",
         sdp
       });
-      this.captureScreenMid(id);
       const pending = this.pendingIceCandidates[id] || [];
       for (const candidate of pending) {
         try {
@@ -890,26 +842,18 @@ var VideoSDKCore = class {
       );
     }
   }
-  // CLEANUP
+  // ---------------- CLEANUP ----------------
   closePeer(id) {
     const pc = this.peers[id];
     if (!pc) return;
     pc.ontrack = null;
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
-    pc.oniceconnectionstatechange = null;
     pc.close();
     delete this.peers[id];
-    delete this.peerTransceivers[id];
     this.initiators.delete(id);
     this.state.removeParticipant(id);
   }
-  // SCREEN SHARE (TRANSCEIVER-BASED)
-  /**
-   * Start screen sharing using replaceTrack on the pre-established screen transceiver.
-   * No need to add/remove tracks, no renegotiation needed (transceiver already in SDP).
-   * Just swap the track and update direction if needed.
-   */
   async startScreenShare() {
     try {
       if (this.state.presenterId && this.state.presenterId !== this.myId) {
@@ -920,55 +864,34 @@ var VideoSDKCore = class {
       }
       this.screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true
+        // audio: true,
       });
-      const screenTrack = this.screenStream.getVideoTracks()[0];
-      if (!screenTrack) {
-        throw new Error("No video track in screen stream");
-      }
       this.isScreenSharing = true;
       this.state.updateLocalParticipant({
         media: {
           isScreenSharing: true,
           screenStream: this.screenStream,
-          screenTrack
+          screenTrack: this.screenStream.getVideoTracks()[0]
         }
       });
       this.state.setPresenterId(this.myId);
-      screenTrack.onended = () => {
-        console.log("[Screen Share] User stopped via browser button");
+      this.screenStream.getVideoTracks()[0].onended = () => {
         this.stopScreenShare();
       };
-      for (const [peerId, pc] of Object.entries(this.peers)) {
-        const txInfo = this.peerTransceivers[peerId];
-        if (!txInfo) {
-          console.warn(
-            `[Screen Share] No transceiver info for ${peerId}, skipping`
-          );
-          continue;
-        }
-        try {
-          await txInfo.screenTransceiver.sender.replaceTrack(screenTrack);
-          if (txInfo.screenTransceiver.currentDirection === "recvonly") {
-            txInfo.screenTransceiver.direction = "sendrecv";
-            console.log(
-              `[Screen Share] Flipped ${peerId} screen transceiver to sendrecv`
-            );
-            await this.createOffer(peerId, true);
-          }
-        } catch (err) {
-          console.error(
-            `[Screen Share] Failed to update transceiver for ${peerId}:`,
-            err
-          );
-        }
-      }
+      Object.entries(this.peers).forEach(([peerId, pc]) => {
+        this.screenSenders[peerId] = [];
+        this.screenStream.getTracks().forEach((track) => {
+          const sender = pc.addTrack(track, this.screenStream);
+          this.screenSenders[peerId].push(sender);
+        });
+        this.createOffer(peerId, true);
+      });
       this.send({
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
         stream_id: this.screenStream.id.replace(/[{}]/g, "")
       });
-      console.log("[Screen Share] Started successfully");
       return this.screenStream;
     } catch (err) {
       this.emitError(
@@ -982,32 +905,21 @@ var VideoSDKCore = class {
       throw err;
     }
   }
-  /**
-   * Stop screen sharing: clear the screen transceiver track and flip direction back to recvonly.
-   */
-  async stopScreenShare() {
+  stopScreenShare() {
     if (!this.screenStream) return;
-    console.log("[Screen Share] Stopping...");
     this.screenStream.getTracks().forEach((t) => t.stop());
-    for (const [peerId, pc] of Object.entries(this.peers)) {
-      const txInfo = this.peerTransceivers[peerId];
-      if (!txInfo) continue;
-      try {
-        await txInfo.screenTransceiver.sender.replaceTrack(null);
-        if (txInfo.screenTransceiver.currentDirection === "sendrecv") {
-          txInfo.screenTransceiver.direction = "recvonly";
-          console.log(
-            `[Screen Share] Flipped ${peerId} screen transceiver to recvonly`
-          );
-          await this.createOffer(peerId, true);
+    Object.entries(this.peers).forEach(([peerId, pc]) => {
+      const senders = this.screenSenders[peerId] || [];
+      senders.forEach((sender) => {
+        try {
+          pc.removeTrack(sender);
+        } catch (err) {
+          console.warn(err);
         }
-      } catch (err) {
-        console.error(
-          `[Screen Share] Failed to clear transceiver for ${peerId}:`,
-          err
-        );
-      }
-    }
+      });
+      delete this.screenSenders[peerId];
+      this.createOffer(peerId, true);
+    });
     this.screenStream = null;
     this.isScreenSharing = false;
     this.state.updateLocalParticipant({
@@ -1025,9 +937,7 @@ var VideoSDKCore = class {
       sender: this.myId,
       room_id: this.room.id
     });
-    console.log("[Screen Share] Stopped");
   }
-  // CHAT
   sendChatMessage(payload) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn("WS not connected");
@@ -1060,13 +970,11 @@ var VideoSDKCore = class {
       client_ts: Date.now()
     });
   }
-  // DISCONNECT
-  async disconnect() {
+  disconnect() {
     this.intentionalDisconnect = true;
-    await this.stopScreenShare();
+    this.stopScreenShare();
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
-    this.peerTransceivers = {};
     this.initiators.clear();
     this.stopHeartbeat();
     if (this.ws?.readyState === WebSocket.OPEN) {

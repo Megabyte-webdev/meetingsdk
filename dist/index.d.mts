@@ -130,7 +130,7 @@ declare class VideoSDKCore {
     private localStream;
     private screenStream;
     private isScreenSharing;
-    private peerTransceivers;
+    private screenSenders;
     private pingInterval;
     private pendingIceCandidates;
     private pendingOffers;
@@ -160,27 +160,14 @@ declare class VideoSDKCore {
     private handleJoinApproved;
     private handle;
     private createPeer;
-    /**
-     * Capture the screen transceiver's MID after SDP negotiation completes.
-     * The MID is assigned during negotiation and is stable for the life of the connection.
-     */
-    private captureScreenMid;
     private createOffer;
     private shouldInitiate;
     private handleOffer;
     private closePeer;
-    /**
-     * Start screen sharing using replaceTrack on the pre-established screen transceiver.
-     * No need to add/remove tracks, no renegotiation needed (transceiver already in SDP).
-     * Just swap the track and update direction if needed.
-     */
     startScreenShare(): Promise<MediaStream>;
-    /**
-     * Stop screen sharing: clear the screen transceiver track and flip direction back to recvonly.
-     */
-    stopScreenShare(): Promise<void>;
+    stopScreenShare(): void;
     sendChatMessage(payload: ChatInput): void;
-    disconnect(): Promise<void>;
+    disconnect(): void;
     private flushIce;
     private send;
     approveJoinRequest(requestId: string): void;
