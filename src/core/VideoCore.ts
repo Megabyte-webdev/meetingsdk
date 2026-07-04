@@ -445,7 +445,7 @@ export class VideoSDKCore {
               `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`,
             );
 
-            this.state.setPresenterId(p.id);
+            this.state.setPresenterId(p.presenterId || null);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
               remoteScreenStreamId: p.remoteScreenStreamId,
