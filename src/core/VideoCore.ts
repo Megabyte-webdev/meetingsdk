@@ -439,6 +439,17 @@ export class VideoSDKCore {
           if (!p?.id || p.id === this.myId) continue;
           this.state.addParticipant(p);
           this.events.onUserJoined?.(p);
+
+          if (p.isScreenSharing && p.remoteScreenStreamId) {
+            console.log(
+              `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`,
+            );
+
+            this.state.updateParticipantMedia(p.id, {
+              isScreenSharing: true,
+              remoteScreenStreamId: p.remoteScreenStreamId,
+            });
+          }
           if (this.shouldInitiate(p.id)) {
             await this.createOffer(p.id);
           }
