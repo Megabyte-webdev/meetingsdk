@@ -651,16 +651,6 @@ var VideoSDKCore = class {
       }
     }
   }
-  // PEER
-  /**
-   * Create a peer connection with pre-established transceiver layout:
-   * - Audio transceiver (sendrecv)
-   * - Camera video transceiver (sendrecv)
-   * - Screen video transceiver (initially recvonly, becomes sendrecv when sharing)
-   *
-   * This fixed layout ensures late joiners get the screen transceiver m-line
-   * negotiated from the very first offer, even if no one is sharing yet.
-   */
   async createPeer(id) {
     if (!this.localStream) throw new Error("No local stream");
     if (!this.iceServers || this.iceServers.length === 0) {
@@ -712,7 +702,7 @@ var VideoSDKCore = class {
     };
     pc.ontrack = (event) => {
       const transceiver = event.transceiver;
-      const isScreenTrack = transceiver.mid === this.peerTransceivers[id]?.screenMid;
+      const isScreenTrack = transceiver === this.peerTransceivers[id]?.screenTransceiver;
       console.log(
         `[ontrack] ${id}: kind=${event.track.kind}, mid=${transceiver.mid}, isScreen=${isScreenTrack}`
       );
@@ -992,6 +982,9 @@ var VideoSDKCore = class {
       throw err;
     }
   }
+  /**
+   * Stop screen sharing: clear the screen transceiver track and flip direction back to recvonly.
+   */
   async stopScreenShare() {
     if (!this.screenStream) return;
     console.log("[Screen Share] Stopping...");
@@ -1068,9 +1061,9 @@ var VideoSDKCore = class {
     });
   }
   // DISCONNECT
-  disconnect() {
+  async disconnect() {
     this.intentionalDisconnect = true;
-    this.stopScreenShare();
+    await this.stopScreenShare();
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
     this.peerTransceivers = {};

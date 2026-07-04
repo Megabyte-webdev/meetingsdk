@@ -159,15 +159,6 @@ declare class VideoSDKCore {
     private reset;
     private handleJoinApproved;
     private handle;
-    /**
-     * Create a peer connection with pre-established transceiver layout:
-     * - Audio transceiver (sendrecv)
-     * - Camera video transceiver (sendrecv)
-     * - Screen video transceiver (initially recvonly, becomes sendrecv when sharing)
-     *
-     * This fixed layout ensures late joiners get the screen transceiver m-line
-     * negotiated from the very first offer, even if no one is sharing yet.
-     */
     private createPeer;
     /**
      * Capture the screen transceiver's MID after SDP negotiation completes.
@@ -184,9 +175,12 @@ declare class VideoSDKCore {
      * Just swap the track and update direction if needed.
      */
     startScreenShare(): Promise<MediaStream>;
+    /**
+     * Stop screen sharing: clear the screen transceiver track and flip direction back to recvonly.
+     */
     stopScreenShare(): Promise<void>;
     sendChatMessage(payload: ChatInput): void;
-    disconnect(): void;
+    disconnect(): Promise<void>;
     private flushIce;
     private send;
     approveJoinRequest(requestId: string): void;
