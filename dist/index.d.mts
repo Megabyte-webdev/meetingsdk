@@ -38,6 +38,8 @@ type ChatMessage = {
 type Participant = {
     id: string;
     name?: string;
+    isHost?: boolean;
+    isLocal?: boolean;
     media?: ParticipantMedia;
 };
 type ParticipantMedia = {
@@ -50,6 +52,7 @@ type ParticipantMedia = {
     camEnabled: boolean;
     isScreenSharing: boolean;
     remoteScreenStreamId?: string;
+    cameraStreamId?: string;
 };
 type Listener = () => void;
 type ChatInput = {

@@ -40,6 +40,8 @@ export type ChatMessage = {
 export type Participant = {
   id: string;
   name?: string;
+  isHost?: boolean;
+  isLocal?: boolean;
   media?: ParticipantMedia;
 };
 
@@ -53,6 +55,7 @@ export type ParticipantMedia = {
   camEnabled: boolean;
   isScreenSharing: boolean;
   remoteScreenStreamId?: string;
+  cameraStreamId?: string;
 };
 
 export type Listener = () => void;

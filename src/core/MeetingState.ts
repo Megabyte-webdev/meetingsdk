@@ -85,8 +85,8 @@ export class MeetingState {
         micEnabled: true,
         camEnabled: true,
         isScreenSharing: false,
-        ...p.media, // preserve existing media items if they happen to exist
-        ...patch, // apply the incoming stream updates
+        ...p.media,
+        ...patch,
       },
     };
 

@@ -101,9 +101,7 @@ var MeetingState = class {
         camEnabled: true,
         isScreenSharing: false,
         ...p.media,
-        // preserve existing media items if they happen to exist
         ...patch
-        // apply the incoming stream updates
       }
     };
     const next = new Map(this.participants);
@@ -290,7 +288,8 @@ var VideoSDKCore = class {
           type: "JOIN",
           room_id: roomId,
           user_id: this.myId,
-          sender_name: name
+          sender_name: name,
+          camera_stream_id: this.localStream?.id.replace(/[{}]/g, "")
         });
       };
       this.ws.onerror = (err) => {
@@ -529,7 +528,8 @@ var VideoSDKCore = class {
             this.state.setPresenterId(p.id);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
-              remoteScreenStreamId: p.remoteScreenStreamId
+              remoteScreenStreamId: p.remoteScreenStreamId,
+              cameraStreamId: p.cameraStreamId || null
             });
             console.log(
               `[EXISTING_USERS] Pre-seeded screen state for ${p.id}, waiting for ontrack`
@@ -652,7 +652,8 @@ var VideoSDKCore = class {
         const peerId2 = msg.peerId;
         this.state.updateParticipantMedia(peerId2, {
           isScreenSharing: true,
-          remoteScreenStreamId: msg.stream_id
+          remoteScreenStreamId: msg.stream_id,
+          cameraStreamId: msg.camera_stream_id || null
         });
         if (!this.state.presenterId) {
           this.state.setPresenterId(peerId2);
@@ -709,10 +710,17 @@ var VideoSDKCore = class {
       console.log("kind:", event.track.kind);
       console.log("mid:", event.transceiver.mid);
       console.log("streams:", event.streams);
-      console.log("stream id:", event.streams[0]?.id);
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
+      const streamId = incomingStream?.id;
       const participant = this.state.getParticipant(id);
-      const isScreenStream = participant?.media?.isScreenSharing && incomingStream.id === participant?.media?.remoteScreenStreamId;
+      const isScreenStream = streamId && (streamId === participant?.media?.remoteScreenStreamId || participant?.media?.isScreenSharing && streamId !== participant?.media?.stream?.id && event.track.kind === "video");
+      console.log(
+        `[ontrack] peerId: ${id}, streamId: ${streamId}, isScreen: ${isScreenStream}`
+      );
+      console.log(`  - cameraStreamId: ${participant?.media?.cameraStreamId}`);
+      console.log(
+        `  - screenStreamId: ${participant?.media?.remoteScreenStreamId}`
+      );
       if (event.track.muted) {
         event.track.onunmute = () => {
           console.log(`${event.track.kind} track unmuted for ${id}`);
@@ -723,12 +731,14 @@ var VideoSDKCore = class {
         this.state.updateParticipantMedia(id, {
           screenStream: incomingStream,
           screenTrack: videoTrack,
+          remoteScreenStreamId: incomingStream.id,
           isScreenSharing: true
         });
         if (!this.state.presenterId) {
           this.state.setPresenterId(id);
         }
         this.events.onScreenShareStarted?.(id, incomingStream);
+        console.log(`Screen share stream detected and stored for ${id}`);
       } else {
         this.state.updateParticipantMedia(id, {
           stream: incomingStream,
@@ -923,6 +933,7 @@ var VideoSDKCore = class {
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
+        camera_id: this.localStream?.id.replace(/[{}]/g, ""),
         stream_id: this.screenStream.id.replace(/[{}]/g, "")
       });
       return this.screenStream;
