@@ -433,6 +433,7 @@ export class VideoSDKCore {
 
           // Trigger your event so the UI knows to render the stage
           this.events.onScreenShareStarted?.(msg.presenterId, null!);
+          this.state.setPresenterId(msg.presenterId);
         }
 
         for (const p of msg.participants || []) {
@@ -445,11 +446,14 @@ export class VideoSDKCore {
               `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`,
             );
 
-            this.state.setPresenterId(p.presenterId || null);
+            this.state.setPresenterId(p.id);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
               remoteScreenStreamId: p.remoteScreenStreamId,
             });
+            console.log(
+              `[EXISTING_USERS] Pre-seeded screen state for ${p.id}, waiting for ontrack`,
+            );
           }
           if (this.shouldInitiate(p.id)) {
             await this.createOffer(p.id);
@@ -672,6 +676,7 @@ export class VideoSDKCore {
       const participant = this.state.getParticipant(id);
 
       const isScreenStream =
+        participant?.media?.isScreenSharing &&
         incomingStream.id === participant?.media?.remoteScreenStreamId;
 
       // Handle track unmuting (happens after RTP data starts flowing)

@@ -483,6 +483,7 @@ var VideoSDKCore = class {
         if (msg.presenterId) {
           this.state.setPresenterId(msg.presenterId);
           this.events.onScreenShareStarted?.(msg.presenterId, null);
+          this.state.setPresenterId(msg.presenterId);
         }
         for (const p of msg.participants || []) {
           if (!p?.id || p.id === this.myId) continue;
@@ -492,11 +493,14 @@ var VideoSDKCore = class {
             console.log(
               `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`
             );
-            this.state.setPresenterId(p.presenterId || null);
+            this.state.setPresenterId(p.id);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
               remoteScreenStreamId: p.remoteScreenStreamId
             });
+            console.log(
+              `[EXISTING_USERS] Pre-seeded screen state for ${p.id}, waiting for ontrack`
+            );
           }
           if (this.shouldInitiate(p.id)) {
             await this.createOffer(p.id);
@@ -670,7 +674,7 @@ var VideoSDKCore = class {
     pc.ontrack = (event) => {
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
       const participant = this.state.getParticipant(id);
-      const isScreenStream = incomingStream.id === participant?.media?.remoteScreenStreamId;
+      const isScreenStream = participant?.media?.isScreenSharing && incomingStream.id === participant?.media?.remoteScreenStreamId;
       if (event.track.muted) {
         event.track.onunmute = () => {
           console.log(`${event.track.kind} track unmuted for ${id}`);
