@@ -660,16 +660,6 @@ export class VideoSDKCore {
     }
   }
 
-  // PEER
-  /**
-   * Create a peer connection with pre-established transceiver layout:
-   * - Audio transceiver (sendrecv)
-   * - Camera video transceiver (sendrecv)
-   * - Screen video transceiver (initially recvonly, becomes sendrecv when sharing)
-   *
-   * This fixed layout ensures late joiners get the screen transceiver m-line
-   * negotiated from the very first offer, even if no one is sharing yet.
-   */
   private async createPeer(id: string) {
     if (!this.localStream) throw new Error("No local stream");
     if (!this.iceServers || this.iceServers.length === 0) {
@@ -693,7 +683,7 @@ export class VideoSDKCore {
       iceServers: this.iceServers,
     });
 
-    // ===== AUDIO TRANSCEIVER =====
+    // AUDIO TRANSCEIVER
     const audioTransceiver = pc.addTransceiver("audio", {
       direction: "sendrecv",
     });
@@ -702,7 +692,7 @@ export class VideoSDKCore {
       await audioTransceiver.sender.replaceTrack(audioTrack);
     }
 
-    // ===== CAMERA VIDEO TRANSCEIVER =====
+    // CAMERA VIDEO TRANSCEIVER
     const cameraTransceiver = pc.addTransceiver("video", {
       direction: "sendrecv",
     });
@@ -711,9 +701,6 @@ export class VideoSDKCore {
       await cameraTransceiver.sender.replaceTrack(videoTrack);
     }
 
-    // ===== SCREEN VIDEO TRANSCEIVER (initially recvonly) =====
-    // This will be present in the SDP even if we're not currently sharing.
-    // When we start sharing, we flip direction to "sendrecv" and replaceTrack.
     const screenTransceiver = pc.addTransceiver("video", {
       direction: this.isScreenSharing ? "sendrecv" : "recvonly",
     });
@@ -732,11 +719,12 @@ export class VideoSDKCore {
       screenMid: null, // will be populated after negotiation
     };
 
-    // ===== TRACK HANDLER =====
+    // TRACK HANDLER
     pc.ontrack = (event) => {
       const transceiver = event.transceiver;
+      // Compare transceiver object reference, not mid (mid may not be assigned yet)
       const isScreenTrack =
-        transceiver.mid === this.peerTransceivers[id]?.screenMid;
+        transceiver === this.peerTransceivers[id]?.screenTransceiver;
 
       console.log(
         `[ontrack] ${id}: kind=${event.track.kind}, mid=${transceiver.mid}, isScreen=${isScreenTrack}`,
@@ -1103,6 +1091,9 @@ export class VideoSDKCore {
     }
   }
 
+  /**
+   * Stop screen sharing: clear the screen transceiver track and flip direction back to recvonly.
+   */
   async stopScreenShare() {
     if (!this.screenStream) return;
 
@@ -1205,10 +1196,10 @@ export class VideoSDKCore {
   }
 
   // DISCONNECT
-  disconnect() {
+  async disconnect() {
     this.intentionalDisconnect = true;
 
-    this.stopScreenShare();
+    await this.stopScreenShare();
 
     Object.values(this.peers).forEach((pc) => pc.close());
     this.peers = {};
