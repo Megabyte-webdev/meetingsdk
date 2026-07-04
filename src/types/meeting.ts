@@ -43,6 +43,7 @@ export type Participant = {
   isHost?: boolean;
   isLocal?: boolean;
   media?: ParticipantMedia;
+  isPresenter?: boolean;
 };
 
 export type ParticipantMedia = {

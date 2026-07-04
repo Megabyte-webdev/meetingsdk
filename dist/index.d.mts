@@ -41,6 +41,7 @@ type Participant = {
     isHost?: boolean;
     isLocal?: boolean;
     media?: ParticipantMedia;
+    isPresenter?: boolean;
 };
 type ParticipantMedia = {
     stream?: MediaStream | null;

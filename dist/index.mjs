@@ -276,7 +276,6 @@ var VideoSDKCore = class {
           return;
         }
         if (this.isWaitingForApproval) {
-          console.log("Waiting for approval, not auto-reconnecting");
           return;
         }
         this.scheduleReconnect();
@@ -486,21 +485,33 @@ var VideoSDKCore = class {
         }
         for (const p of msg.participants || []) {
           if (!p?.id || p.id === this.myId) continue;
-          this.state.addParticipant(p);
-          this.events.onUserJoined?.(p);
+          const structuredParticipant = {
+            id: p.id,
+            name: p.name,
+            isHost: p.isHost,
+            isPresenter: p.isPresenter,
+            media: {
+              stream: null,
+              screenStream: void 0,
+              cameraTrack: void 0,
+              screenTrack: void 0,
+              audioTrack: void 0,
+              micEnabled: p.micEnabled ?? true,
+              camEnabled: p.camEnabled ?? true,
+              isScreenSharing: p.isScreenSharing ?? false,
+              remoteScreenStreamId: p.remoteScreenStreamId || void 0,
+              cameraStreamId: p.cameraId || void 0
+            }
+          };
+          this.state.addParticipant(structuredParticipant);
+          this.events.onUserJoined?.(structuredParticipant);
           if (p.isScreenSharing && p.remoteScreenStreamId) {
-            console.log(
-              `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`
-            );
             this.state.setPresenterId(p.id);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
               remoteScreenStreamId: p.remoteScreenStreamId,
-              cameraStreamId: p.cameraStreamId || null
+              cameraStreamId: p.cameraId || null
             });
-            console.log(
-              `[EXISTING_USERS] Pre-seeded screen state for ${p.id}, waiting for ontrack`
-            );
           }
           if (this.shouldInitiate(p.id)) {
             await this.createOffer(p.id);
@@ -523,7 +534,6 @@ var VideoSDKCore = class {
             "pending offers"
           );
           for (const [peerId2, sdp] of Object.entries(this.pendingOffers)) {
-            console.log("Handling queued offer from", peerId2);
             await this.handleOffer(sdp, peerId2);
           }
           this.pendingOffers = {};
@@ -546,7 +556,6 @@ var VideoSDKCore = class {
       }
       case "JOIN_PENDING": {
         const req = msg.request;
-        console.log("JOIN_PENDING - waiting for host approval");
         this.isWaitingForApproval = true;
         this.pendingRequestId = req.request_id;
         this.events.onEntryRequested?.({
@@ -558,7 +567,6 @@ var VideoSDKCore = class {
       }
       case "JOIN_REQUEST": {
         const req = msg.request;
-        console.log("JOIN_REQUEST - show to host for approval");
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -566,15 +574,12 @@ var VideoSDKCore = class {
         });
         break;
       }
-      // ============ NEW: HANDLE JOIN_APPROVED WITH RECONNECT ============
       case "JOIN_APPROVED": {
         await this.handleJoinApproved(msg);
         break;
       }
-      // ============ END: JOIN_APPROVED ============
       case "JOIN_REJECTED": {
         const decision = "rejected";
-        console.log("JOIN_REJECTED - user not allowed to join");
         this.isWaitingForApproval = false;
         this.pendingRequestId = null;
         this.events.onEntryResponded?.({
@@ -620,7 +625,7 @@ var VideoSDKCore = class {
         this.state.updateParticipantMedia(peerId2, {
           isScreenSharing: true,
           remoteScreenStreamId: msg.stream_id,
-          cameraStreamId: msg.camera_stream_id || null
+          cameraStreamId: msg?.camera_stream_id
         });
         if (!this.state.presenterId) {
           this.state.setPresenterId(peerId2);
@@ -661,33 +666,15 @@ var VideoSDKCore = class {
         "ICE Servers not configured. Backend must provide iceServers on JOIN."
       );
     }
-    console.log(
-      "Adding tracks",
-      this.localStream.getTracks().map((t) => ({
-        kind: t.kind,
-        enabled: t.enabled,
-        state: t.readyState
-      }))
-    );
     const pc = new RTCPeerConnection({
       iceServers: this.iceServers
     });
     pc.ontrack = (event) => {
-      console.log("ontrack");
-      console.log("kind:", event.track.kind);
-      console.log("mid:", event.transceiver.mid);
-      console.log("streams:", event.streams);
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
-      const streamId = incomingStream?.id;
+      const streamId = incomingStream?.id?.replace(/[{}]/g, "");
       const participant = this.state.getParticipant(id);
-      const isScreenStream = streamId && (streamId === participant?.media?.remoteScreenStreamId || participant?.media?.isScreenSharing && streamId !== participant?.media?.stream?.id && event.track.kind === "video");
-      console.log(
-        `[ontrack] peerId: ${id}, streamId: ${streamId}, isScreen: ${isScreenStream}`
-      );
-      console.log(`  - cameraStreamId: ${participant?.media?.cameraStreamId}`);
-      console.log(
-        `  - screenStreamId: ${participant?.media?.remoteScreenStreamId}`
-      );
+      const isCameraStream = streamId && participant?.media?.cameraStreamId && streamId === participant?.media?.cameraStreamId;
+      const isScreenStream = streamId && participant?.media?.remoteScreenStreamId && streamId === participant?.media?.remoteScreenStreamId;
       if (event.track.muted) {
         event.track.onunmute = () => {
           console.log(`${event.track.kind} track unmuted for ${id}`);
@@ -705,7 +692,14 @@ var VideoSDKCore = class {
           this.state.setPresenterId(id);
         }
         this.events.onScreenShareStarted?.(id, incomingStream);
-        console.log(`Screen share stream detected and stored for ${id}`);
+        console.log(`Screen share stream detected for ${id}`);
+      } else if (isCameraStream) {
+        this.state.updateParticipantMedia(id, {
+          stream: incomingStream,
+          cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0]
+        });
+        this.events.onTrack?.(incomingStream, id);
       } else {
         this.state.updateParticipantMedia(id, {
           stream: incomingStream,

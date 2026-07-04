@@ -4,6 +4,7 @@ import {
   ChatMessage,
   Events,
   MeetingConfig,
+  Participant,
   SDKError,
 } from "../types/meeting";
 import { MeetingState } from "./MeetingState";
@@ -169,7 +170,6 @@ export class VideoSDKCore {
 
         // Don't auto-reconnect if waiting for approval (user must reconnect after approval)
         if (this.isWaitingForApproval) {
-          console.log("Waiting for approval, not auto-reconnecting");
           return;
         }
 
@@ -432,30 +432,40 @@ export class VideoSDKCore {
         if (msg.presenterId) {
           this.state.setPresenterId(msg.presenterId);
 
-          // Trigger your event so the UI knows to render the stage
           this.events.onScreenShareStarted?.(msg.presenterId, null!);
           this.state.setPresenterId(msg.presenterId);
         }
 
         for (const p of msg.participants || []) {
           if (!p?.id || p.id === this.myId) continue;
-          this.state.addParticipant(p);
-          this.events.onUserJoined?.(p);
+          const structuredParticipant: Participant = {
+            id: p.id,
+            name: p.name,
+            isHost: p.isHost,
+            isPresenter: p.isPresenter,
+            media: {
+              stream: null,
+              screenStream: undefined,
+              cameraTrack: undefined,
+              screenTrack: undefined,
+              audioTrack: undefined,
+              micEnabled: p.micEnabled ?? true,
+              camEnabled: p.camEnabled ?? true,
+              isScreenSharing: p.isScreenSharing ?? false,
+              remoteScreenStreamId: p.remoteScreenStreamId || undefined,
+              cameraStreamId: p.cameraId || undefined,
+            },
+          };
+          this.state.addParticipant(structuredParticipant);
+          this.events.onUserJoined?.(structuredParticipant);
 
           if (p.isScreenSharing && p.remoteScreenStreamId) {
-            console.log(
-              `[Existing Users] ${p.name} is sharing screen (stream: ${p.remoteScreenStreamId})`,
-            );
-
             this.state.setPresenterId(p.id);
             this.state.updateParticipantMedia(p.id, {
               isScreenSharing: true,
               remoteScreenStreamId: p.remoteScreenStreamId,
-              cameraStreamId: p.cameraStreamId || null,
+              cameraStreamId: p.cameraId || null,
             });
-            console.log(
-              `[EXISTING_USERS] Pre-seeded screen state for ${p.id}, waiting for ontrack`,
-            );
           }
           if (this.shouldInitiate(p.id)) {
             await this.createOffer(p.id);
@@ -482,7 +492,6 @@ export class VideoSDKCore {
             "pending offers",
           );
           for (const [peerId, sdp] of Object.entries(this.pendingOffers)) {
-            console.log("Handling queued offer from", peerId);
             await this.handleOffer(sdp, peerId);
           }
           this.pendingOffers = {};
@@ -511,7 +520,6 @@ export class VideoSDKCore {
       case "JOIN_PENDING": {
         const req = msg.request;
 
-        console.log("JOIN_PENDING - waiting for host approval");
         this.isWaitingForApproval = true;
         this.pendingRequestId = req.request_id;
 
@@ -526,9 +534,6 @@ export class VideoSDKCore {
 
       case "JOIN_REQUEST": {
         const req = msg.request;
-
-        console.log("JOIN_REQUEST - show to host for approval");
-
         this.events.onEntryRequested?.({
           requestId: req.id,
           userId: req.user_id,
@@ -538,17 +543,14 @@ export class VideoSDKCore {
         break;
       }
 
-      // ============ NEW: HANDLE JOIN_APPROVED WITH RECONNECT ============
       case "JOIN_APPROVED": {
         await this.handleJoinApproved(msg);
         break;
       }
-      // ============ END: JOIN_APPROVED ============
 
       case "JOIN_REJECTED": {
         const decision = "rejected";
 
-        console.log("JOIN_REJECTED - user not allowed to join");
         this.isWaitingForApproval = false;
         this.pendingRequestId = null;
 
@@ -574,7 +576,6 @@ export class VideoSDKCore {
         const peerId = msg.peerId;
         const { kind, enabled } = msg;
 
-        // 1. Sync the app state layer for UI rendering components
         if (kind === "audio") {
           this.state.updateParticipantMedia(peerId, { micEnabled: enabled });
           this.events.onMicToggled?.(peerId, enabled);
@@ -608,14 +609,13 @@ export class VideoSDKCore {
         this.state.updateParticipantMedia(peerId, {
           isScreenSharing: true,
           remoteScreenStreamId: msg.stream_id,
-          cameraStreamId: msg.camera_stream_id || null,
+          cameraStreamId: msg?.camera_stream_id,
         });
 
         if (!this.state.presenterId) {
           this.state.setPresenterId(peerId);
         }
 
-        // Fix: Use screenStream instead of the regular camera stream
         const screenStream =
           this.state.getParticipant(peerId)?.media?.screenStream;
 
@@ -660,45 +660,26 @@ export class VideoSDKCore {
       );
     }
 
-    console.log(
-      "Adding tracks",
-      this.localStream.getTracks().map((t) => ({
-        kind: t.kind,
-        enabled: t.enabled,
-        state: t.readyState,
-      })),
-    );
-
     const pc = new RTCPeerConnection({
       iceServers: this.iceServers,
     });
 
     pc.ontrack = (event) => {
-      console.log("ontrack");
-      console.log("kind:", event.track.kind);
-      console.log("mid:", event.transceiver.mid);
-      console.log("streams:", event.streams);
-
       const incomingStream =
         event.streams?.[0] || new MediaStream([event.track]);
-      const streamId = incomingStream?.id;
+      const streamId = incomingStream?.id?.replace(/[{}]/g, "");
 
       const participant = this.state.getParticipant(id);
 
+      const isCameraStream =
+        streamId &&
+        participant?.media?.cameraStreamId &&
+        streamId === participant?.media?.cameraStreamId;
+
       const isScreenStream =
         streamId &&
-        (streamId === participant?.media?.remoteScreenStreamId ||
-          (participant?.media?.isScreenSharing &&
-            streamId !== participant?.media?.stream?.id &&
-            event.track.kind === "video"));
-
-      console.log(
-        `[ontrack] peerId: ${id}, streamId: ${streamId}, isScreen: ${isScreenStream}`,
-      );
-      console.log(`  - cameraStreamId: ${participant?.media?.cameraStreamId}`);
-      console.log(
-        `  - screenStreamId: ${participant?.media?.remoteScreenStreamId}`,
-      );
+        participant?.media?.remoteScreenStreamId &&
+        streamId === participant?.media?.remoteScreenStreamId;
 
       if (event.track.muted) {
         event.track.onunmute = () => {
@@ -725,7 +706,14 @@ export class VideoSDKCore {
         }
 
         this.events.onScreenShareStarted?.(id, incomingStream);
-        console.log(`Screen share stream detected and stored for ${id}`);
+        console.log(`Screen share stream detected for ${id}`);
+      } else if (isCameraStream) {
+        this.state.updateParticipantMedia(id, {
+          stream: incomingStream,
+          cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0],
+        });
+        this.events.onTrack?.(incomingStream, id);
       } else {
         this.state.updateParticipantMedia(id, {
           stream: incomingStream,
