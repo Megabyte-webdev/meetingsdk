@@ -217,6 +217,7 @@ var VideoSDKCore = class {
     // Track if we're in the waiting room (pending approval)
     this.isWaitingForApproval = false;
     this.pendingRequestId = null;
+    this.iceTransportPolicy = "all";
     this.state = new MeetingState();
     this.events = events;
     this.url = url;
@@ -700,7 +701,8 @@ var VideoSDKCore = class {
       );
     }
     const pc = new RTCPeerConnection({
-      iceServers: this.iceServers
+      iceServers: this.iceServers,
+      iceTransportPolicy: this.iceTransportPolicy
     });
     pc.ontrack = (event) => {
       const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
@@ -744,6 +746,7 @@ var VideoSDKCore = class {
     };
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
+      console.log("LOCAL ICE:", e.candidate.candidate);
       this.send({
         type: "ICE",
         payload: JSON.stringify(e.candidate),
@@ -751,8 +754,20 @@ var VideoSDKCore = class {
         target: id
       });
     };
-    pc.oniceconnectionstatechange = () => {
-      console.log(`ICE Connection State: ${pc.iceConnectionState}`);
+    pc.oniceconnectionstatechange = async () => {
+      console.log("================================");
+      console.log(`Peer: ${id}`);
+      console.log(`ICE: ${pc.iceConnectionState}`);
+      console.log(`Connection: ${pc.connectionState}`);
+      console.log(`Signaling: ${pc.signalingState}`);
+      if (pc.iceConnectionState === "disconnected") {
+        const stats = await pc.getStats();
+        stats.forEach((report) => {
+          if (report.type === "transport") {
+            console.log(JSON.stringify(report, null, 2));
+          }
+        });
+      }
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {

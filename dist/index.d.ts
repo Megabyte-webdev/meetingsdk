@@ -146,6 +146,7 @@ declare class VideoSDKCore {
     private joinRejecter?;
     private isWaitingForApproval;
     private pendingRequestId;
+    private iceTransportPolicy;
     private emitError;
     constructor(events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;

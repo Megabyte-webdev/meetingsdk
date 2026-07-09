@@ -40,6 +40,7 @@ export class VideoSDKCore {
   // Track if we're in the waiting room (pending approval)
   private isWaitingForApproval = false;
   private pendingRequestId: string | null = null;
+  private iceTransportPolicy: RTCIceTransportPolicy = "all";
 
   private emitError(
     code: string,
@@ -662,6 +663,7 @@ export class VideoSDKCore {
 
     const pc = new RTCPeerConnection({
       iceServers: this.iceServers,
+      iceTransportPolicy: this.iceTransportPolicy,
     });
 
     pc.ontrack = (event) => {
@@ -726,6 +728,8 @@ export class VideoSDKCore {
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
+
+      console.log("LOCAL ICE:", e.candidate.candidate);
       this.send({
         type: "ICE",
         payload: JSON.stringify(e.candidate),
@@ -734,8 +738,22 @@ export class VideoSDKCore {
       });
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log(`ICE Connection State: ${pc.iceConnectionState}`);
+    pc.oniceconnectionstatechange = async () => {
+      console.log("================================");
+      console.log(`Peer: ${id}`);
+      console.log(`ICE: ${pc.iceConnectionState}`);
+      console.log(`Connection: ${pc.connectionState}`);
+      console.log(`Signaling: ${pc.signalingState}`);
+
+      if (pc.iceConnectionState === "disconnected") {
+        const stats = await pc.getStats();
+
+        stats.forEach((report) => {
+          if (report.type === "transport") {
+            console.log(JSON.stringify(report, null, 2));
+          }
+        });
+      }
     };
 
     pc.onconnectionstatechange = () => {
