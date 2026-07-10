@@ -181,6 +181,8 @@ var VideoSDKCore = class {
     this.pendingOffers = {};
     this.reconnectAttempts = 0;
     this.participantName = "";
+    this.initialAudioMuted = false;
+    this.initialVideoMuted = false;
     // Track if we're in the waiting room (pending approval)
     this.isWaitingForApproval = false;
     this.pendingRequestId = null;
@@ -257,7 +259,9 @@ var VideoSDKCore = class {
           room_id: roomId,
           user_id: this.myId,
           sender_name: name,
-          camera_stream_id: this.localStream?.id.replace(/[{}]/g, "")
+          camera_stream_id: this.localStream?.id.replace(/[{}]/g, ""),
+          audio_muted: this.initialAudioMuted,
+          video_muted: this.initialVideoMuted
         });
       };
       this.ws.onerror = (err) => {
@@ -291,6 +295,8 @@ var VideoSDKCore = class {
     if (!roomId || !name) {
       throw new Error("roomId and name are required to join meeting");
     }
+    this.initialAudioMuted = audioMuted;
+    this.initialVideoMuted = videoMuted;
     this.participantName = name;
     if (!this.localStream) {
       this.localStream = await navigator.mediaDevices.getUserMedia({
@@ -538,6 +544,20 @@ var VideoSDKCore = class {
             await this.handleOffer(sdp, peerId2);
           }
           this.pendingOffers = {};
+        }
+        if (this.initialAudioMuted) {
+          this.send({
+            type: "MEDIA_STATE",
+            kind: "audio",
+            enabled: false
+          });
+        }
+        if (this.initialVideoMuted) {
+          this.send({
+            type: "MEDIA_STATE",
+            kind: "video",
+            enabled: false
+          });
         }
         this.startHeartbeat();
         this.joinResolver?.();
