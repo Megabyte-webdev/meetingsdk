@@ -16,7 +16,6 @@ type PubSubHandle = {
 
 type MeetingContextValue = {
   sdk: VideoSDKCore;
-
   join: (config?: MeetingConfig) => Promise<void>;
   leave: () => void;
 
