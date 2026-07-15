@@ -10,3 +10,4 @@ export { MeetingProvider, useMeetingContext } from "./react/MeetingProvider";
 export { useMeeting } from "./react/useMeeting";
 export { useParticipants } from "./react/useParticipants";
 export { useRemoteMedia } from "./react/useRemoteMedia";
+export { useMeetingPreview } from "./react/useMeetingPreview";
