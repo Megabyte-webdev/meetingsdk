@@ -6,9 +6,16 @@ on:
       - "v*"
 
 jobs:
-  publish:
+  test:
+    name: Run Test Suites
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
+  publish-npm:
+    name: Build Package & Publish to npm
+    needs: test
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,12 +33,9 @@ jobs:
       - name: Build package
         run: npm run build
 
-      - name: Verify npm auth
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish to npm
-        run: npm publish
+        run: |
+          cd pkg
+          npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
