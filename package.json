@@ -38,7 +38,8 @@
     "sdk",
     "rust",
     "sdk",
-    "typescript"
+    "typescript",
+    "videosdk"
   ],
   "author": "Afolabi Mubarak",
   "license": "MIT",
