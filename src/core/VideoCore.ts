@@ -36,8 +36,6 @@ export class VideoSDKCore {
   public readonly state: MeetingState;
   private joinResolver?: () => void;
   private joinRejecter?: (e: any) => void;
-  private initialAudioMuted = false;
-  private initialVideoMuted = false;
 
   // Track if we're in the waiting room (pending approval)
   private isWaitingForApproval = false;
@@ -147,8 +145,8 @@ export class VideoSDKCore {
           user_id: this.myId,
           sender_name: name,
           camera_stream_id: this.localStream?.id.replace(/[{}]/g, ""),
-          audio_muted: this.initialAudioMuted,
-          video_muted: this.initialVideoMuted,
+          audio_muted: this.state.localParticipant?.media?.micEnabled,
+          video_muted: this.state.localParticipant?.media?.camEnabled,
         });
       };
 
@@ -193,10 +191,6 @@ export class VideoSDKCore {
     if (!roomId || !name) {
       throw new Error("roomId and name are required to join meeting");
     }
-
-    // Store for later broadcast
-    this.initialAudioMuted = audioMuted;
-    this.initialVideoMuted = videoMuted;
 
     this.participantName = name;
 
@@ -506,18 +500,19 @@ export class VideoSDKCore {
           this.pendingOffers = {};
         }
 
-        if (this.initialAudioMuted) {
+        const media = this.state.localParticipant?.media;
+
+        if (media) {
           this.send({
             type: "MEDIA_STATE",
             kind: "audio",
-            enabled: false,
+            enabled: !!media.micEnabled,
           });
-        }
-        if (this.initialVideoMuted) {
+
           this.send({
             type: "MEDIA_STATE",
             kind: "video",
-            enabled: false,
+            enabled: !!media.camEnabled,
           });
         }
         this.startHeartbeat();

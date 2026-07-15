@@ -144,8 +144,6 @@ declare class VideoSDKCore {
     readonly state: MeetingState;
     private joinResolver?;
     private joinRejecter?;
-    private initialAudioMuted;
-    private initialVideoMuted;
     private isWaitingForApproval;
     private pendingRequestId;
     private iceTransportPolicy;
