@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { SDK_CONFIG } from "../config/ws";
 
 type LiveRoomState = {
@@ -7,6 +7,8 @@ type LiveRoomState = {
   canJoin: boolean;
   approved: boolean;
   isHost: boolean;
+  hasMoreParticipants: boolean;
+
   participants: {
     id: string;
     name: string;
@@ -19,46 +21,78 @@ type LiveRoomState = {
 
 export function useMeetingPreview(roomId: string, userId: string) {
   const [room, setRoom] = useState<LiveRoomState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-
-  const load = useCallback(async () => {
-    if (!roomId || !userId) return;
-
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      const res = await fetch(
-        `${SDK_CONFIG.baseUrl}/api/rooms/${roomId}/live?user_id=${userId}`,
-      );
-
-      if (!res.ok) {
-        throw new Error("Failed to fetch meeting preview");
-      }
-
-      const data = await res.json();
-
-      setRoom(data);
-    } catch (err) {
-      setError(err instanceof Error ? err : new Error("Unknown error"));
-    } finally {
-      setIsLoading(false);
-    }
-  }, [roomId, userId]);
 
   useEffect(() => {
-    load();
+    if (!roomId || !userId) {
+      setIsLoading(false);
+      return;
+    }
 
-    const interval = setInterval(load, 5000);
+    let ws: WebSocket | null = null;
 
-    return () => clearInterval(interval);
-  }, [load]);
+    const heartbeat = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "PING",
+          }),
+        );
+      }
+    }, 20000);
+
+    ws = new WebSocket(`${SDK_CONFIG.wsUrl}/watch/${roomId}?user_id=${userId}`);
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      setError(null);
+      console.log("[Preview] watcher connected");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type !== "ROOM_PRESENCE_UPDATE") {
+          return;
+        }
+        setRoom({
+          active: msg.active ?? false,
+          count: msg.count ?? 0,
+          canJoin: msg.canJoin ?? false,
+          approved: msg.approved ?? false,
+          isHost: msg.isHost ?? false,
+          hasMoreParticipants: msg.hasMoreParticipants ?? false,
+          participants: msg.participants ?? [],
+        });
+        // first valid room payload received
+        setIsLoading(false);
+      } catch (err) {
+        console.error("Invalid room presence payload", err);
+        setIsLoading(false);
+      }
+    };
+    ws.onerror = () => {
+      setError("Failed to connect to room monitor");
+      setIsLoading(false);
+    };
+    ws.onclose = () => {
+      setIsConnected(false);
+      console.log("[Preview] disconnected");
+    };
+    return () => {
+      clearInterval(heartbeat);
+      if (ws) {
+        ws.close(1000, "Leaving preview");
+      }
+    };
+  }, [roomId, userId]);
 
   return {
     room,
+    isConnected,
     isLoading,
     error,
-    refetch: load,
   };
 }

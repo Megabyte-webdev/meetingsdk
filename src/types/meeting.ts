@@ -14,6 +14,7 @@ export type Events = {
 
   onJoinApproved?: (requestId: string) => void;
   onJoinRejected?: (requestId: string) => void;
+  onRoomUpdate?: (data: any) => void;
 
   onUserLeft?: (id: string) => void;
   onMeetingLeft?: () => void;
