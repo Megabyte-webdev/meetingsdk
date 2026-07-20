@@ -774,12 +774,20 @@ export class VideoSDKCore {
       }
     };
 
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
-        try {
-          pc.restartIce();
-        } catch {}
+    pc.onconnectionstatechange = async () => {
+      console.log(`[PC STATE] ${id}`, pc.connectionState);
+
+      if (
+        pc.connectionState === "failed" ||
+        pc.iceConnectionState === "failed"
+      ) {
+        console.warn(`[ICE FAILED] Restarting connection with ${id}`);
+
+        await this.restartPeerIce(id);
       }
+    };
+    pc.onicegatheringstatechange = () => {
+      console.log(`[ICE GATHERING] ${id}`, pc.iceGatheringState);
     };
 
     this.localStream.getTracks().forEach((track) => {
@@ -799,7 +807,7 @@ export class VideoSDKCore {
 
   // ---------------- OFFER ----------------
   private async createOffer(id: string, isRenegotiation = false) {
-    if (!isRenegotiation && !this.shouldInitiate(id)) {
+    if (!this.shouldInitiate(id)) {
       console.debug(
         `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`,
       );
@@ -866,7 +874,9 @@ export class VideoSDKCore {
           console.warn(
             `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`,
           );
-          return; // Ignore their offer, wait for their ANSWER
+          await pc.setLocalDescription({
+            type: "rollback",
+          });
         } else {
           // THEY WIN: Roll back and accept their offer
           console.warn(
@@ -932,7 +942,6 @@ export class VideoSDKCore {
       );
     }
   }
-
   // ---------------- CLEANUP ----------------
   private closePeer(id: string) {
     const pc = this.peers[id];
@@ -1144,6 +1153,34 @@ export class VideoSDKCore {
 
     this.state.clearChat();
     this.state.setPresenterId(null);
+  }
+
+  private async restartPeerIce(id: string) {
+    const pc = this.peers[id];
+
+    if (!pc) return;
+
+    try {
+      pc.restartIce();
+
+      const offer = await pc.createOffer({
+        iceRestart: true,
+      });
+
+      await pc.setLocalDescription(offer);
+
+      this.send({
+        type: "OFFER",
+        payload: offer.sdp,
+        sender: this.myId,
+        target: id,
+        iceRestart: true,
+      });
+
+      console.log(`[ICE RESTART] offer sent to ${id}`);
+    } catch (err) {
+      console.error(`[ICE RESTART FAILED] ${id}`, err);
+    }
   }
 
   private async flushIce(id: string, pc: RTCPeerConnection) {
