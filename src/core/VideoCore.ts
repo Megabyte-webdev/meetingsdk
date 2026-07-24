@@ -6,6 +6,7 @@ import {
   MeetingConfig,
   Participant,
   SDKError,
+  TrackDescriptor,
 } from "../types/meeting";
 import { MeetingState } from "./MeetingState";
 
@@ -13,6 +14,7 @@ export class VideoSDKCore {
   private ws: WebSocket | null = null;
   private pubPC: RTCPeerConnection | null = null;
   private subPC: RTCPeerConnection | null = null;
+  private pendingTracks: TrackDescriptor[] = [];
 
   private iceServers: RTCIceServer[] = [];
   private lastPong = Date.now();
@@ -81,6 +83,8 @@ export class VideoSDKCore {
         name: this.participantName,
         media: {
           stream: this.localStream,
+          cameraTrack: this.localStream.getVideoTracks()[0],
+          audioTrack: this.localStream.getAudioTracks()[0],
           micEnabled: true,
           camEnabled: true,
           isScreenSharing: false,
@@ -116,6 +120,8 @@ export class VideoSDKCore {
       name: this.participantName,
       media: {
         stream: this.localStream,
+        cameraTrack: this.localStream.getVideoTracks()[0],
+        audioTrack: this.localStream.getAudioTracks()[0],
         micEnabled: !audioMuted,
         camEnabled: !videoMuted,
         isScreenSharing: false,
@@ -135,7 +141,6 @@ export class VideoSDKCore {
       iceTransportPolicy: this.iceTransportPolicy,
     });
 
-    // Add local tracks to Publisher PC
     this.localStream.getTracks().forEach((track) => {
       this.pubPC?.addTrack(track, this.localStream!);
     });
@@ -175,51 +180,37 @@ export class VideoSDKCore {
     };
 
     this.subPC.ontrack = (event) => {
-      const incomingStream = event.streams[0] || new MediaStream([event.track]);
-      const streamId = incomingStream.id.replace(/[{}]/g, "");
+      const descriptor = this.pendingTracks.shift();
 
-      // Find participant that owns this stream ID
-      let matchedParticipant: Participant | undefined;
-      for (const p of this.state.participants.values()) {
-        if (
-          p.media?.cameraStreamId === streamId ||
-          p.media?.remoteScreenStreamId === streamId
-        ) {
-          matchedParticipant = p;
-          break;
-        }
-      }
-
-      if (!matchedParticipant) {
-        console.warn(
-          `[SFU ontrack] Dynamic track received for stream ${streamId}`,
-        );
+      if (!descriptor) {
+        console.warn("Unknown incoming track");
         return;
       }
 
-      const pId = matchedParticipant.id;
-      const isScreen =
-        streamId === matchedParticipant.media?.remoteScreenStreamId;
+      const stream = event.streams[0] || new MediaStream([event.track]);
 
-      if (isScreen) {
-        this.state.updateParticipantMedia(pId, {
-          screenStream: incomingStream,
-          screenTrack: event.track,
-          isScreenSharing: true,
-        });
+      switch (descriptor.source) {
+        case "camera":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            stream,
+            cameraTrack: event.track,
+          });
+          break;
 
-        if (!this.state.presenterId) {
-          this.state.setPresenterId(pId);
-        }
+        case "screen":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            screenStream: stream,
+            screenTrack: event.track,
+            isScreenSharing: true,
+          });
+          break;
 
-        this.events.onScreenShareStarted?.(pId, incomingStream);
-      } else {
-        this.state.updateParticipantMedia(pId, {
-          stream: incomingStream,
-          cameraTrack: incomingStream.getVideoTracks()[0],
-          audioTrack: incomingStream.getAudioTracks()[0],
-        });
-        this.events.onTrack?.(incomingStream, pId);
+        case "audio":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            stream,
+            audioTrack: event.track,
+          });
+          break;
       }
     };
 
@@ -302,11 +293,9 @@ export class VideoSDKCore {
         this.intentionalDisconnect = false;
         this.reconnectAttempts = 0;
 
-        // Initialize Publisher and Subscriber PeerConnections with SFU
         this.setupPublisherPC();
         this.setupSubscriberPC();
 
-        // Create initial Publisher Offer to send client streams to SFU
         await this.createPublisherOffer();
 
         this.startHeartbeat();
@@ -316,7 +305,7 @@ export class VideoSDKCore {
         break;
       }
 
-      case "SFU_PUB_ANSWER": {
+      case "PUB_ANSWER": {
         if (this.pubPC) {
           await this.pubPC.setRemoteDescription({
             type: "answer",
@@ -326,7 +315,8 @@ export class VideoSDKCore {
         break;
       }
 
-      case "SFU_SUB_OFFER": {
+      case "SUB_OFFER": {
+        this.pendingTracks.push(msg.track);
         if (this.subPC) {
           await this.subPC.setRemoteDescription({
             type: "offer",
@@ -577,8 +567,9 @@ export class VideoSDKCore {
       this.isScreenSharing = true;
 
       const screenTrack = this.screenStream.getVideoTracks()[0];
-
-      // Add Screen track directly to SFU Publisher PC
+      Object.defineProperty(screenTrack, "contentHint", {
+        value: "detail",
+      });
       if (this.pubPC) {
         this.screenSender = this.pubPC.addTrack(screenTrack, this.screenStream);
         await this.createPublisherOffer();
@@ -602,7 +593,6 @@ export class VideoSDKCore {
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
-        camera_id: this.localStream?.id.replace(/[{}]/g, ""),
         stream_id: this.screenStream.id.replace(/[{}]/g, ""),
       });
 
@@ -620,19 +610,15 @@ export class VideoSDKCore {
     }
   }
 
-  stopScreenShare() {
+  async stopScreenShare() {
     if (!this.screenStream) return;
 
     this.screenStream.getTracks().forEach((t) => t.stop());
 
     if (this.pubPC && this.screenSender) {
-      try {
-        this.pubPC.removeTrack(this.screenSender);
-        this.createPublisherOffer();
-      } catch (e) {
-        console.warn("Failed removing screen sender", e);
-      }
+      this.pubPC.removeTrack(this.screenSender);
       this.screenSender = null;
+      await this.createPublisherOffer();
     }
 
     this.screenStream = null;

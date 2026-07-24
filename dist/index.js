@@ -40,8 +40,8 @@ var import_react2 = require("react");
 
 // src/config/ws.ts
 var SDK_CONFIG = {
-  wsUrl: "ws://localhost:8080/ws",
-  baseUrl: "http://localhost:8080"
+  wsUrl: "wss://localhost:8080/ws",
+  baseUrl: "https://localhost:8080"
 };
 
 // src/core/MeetingState.ts
@@ -200,6 +200,7 @@ var VideoSDKCore = class {
     this.ws = null;
     this.pubPC = null;
     this.subPC = null;
+    this.pendingTracks = [];
     this.iceServers = [];
     this.lastPong = Date.now();
     this.intentionalDisconnect = false;
@@ -246,6 +247,8 @@ var VideoSDKCore = class {
         name: this.participantName,
         media: {
           stream: this.localStream,
+          cameraTrack: this.localStream.getVideoTracks()[0],
+          audioTrack: this.localStream.getAudioTracks()[0],
           micEnabled: true,
           camEnabled: true,
           isScreenSharing: false
@@ -276,6 +279,8 @@ var VideoSDKCore = class {
       name: this.participantName,
       media: {
         stream: this.localStream,
+        cameraTrack: this.localStream.getVideoTracks()[0],
+        audioTrack: this.localStream.getAudioTracks()[0],
         micEnabled: !audioMuted,
         camEnabled: !videoMuted,
         isScreenSharing: false
@@ -325,40 +330,32 @@ var VideoSDKCore = class {
       }
     };
     this.subPC.ontrack = (event) => {
-      const incomingStream = event.streams[0] || new MediaStream([event.track]);
-      const streamId = incomingStream.id.replace(/[{}]/g, "");
-      let matchedParticipant;
-      for (const p of this.state.participants.values()) {
-        if (p.media?.cameraStreamId === streamId || p.media?.remoteScreenStreamId === streamId) {
-          matchedParticipant = p;
-          break;
-        }
-      }
-      if (!matchedParticipant) {
-        console.warn(
-          `[SFU ontrack] Dynamic track received for stream ${streamId}`
-        );
+      const descriptor = this.pendingTracks.shift();
+      if (!descriptor) {
+        console.warn("Unknown incoming track");
         return;
       }
-      const pId = matchedParticipant.id;
-      const isScreen = streamId === matchedParticipant.media?.remoteScreenStreamId;
-      if (isScreen) {
-        this.state.updateParticipantMedia(pId, {
-          screenStream: incomingStream,
-          screenTrack: event.track,
-          isScreenSharing: true
-        });
-        if (!this.state.presenterId) {
-          this.state.setPresenterId(pId);
-        }
-        this.events.onScreenShareStarted?.(pId, incomingStream);
-      } else {
-        this.state.updateParticipantMedia(pId, {
-          stream: incomingStream,
-          cameraTrack: incomingStream.getVideoTracks()[0],
-          audioTrack: incomingStream.getAudioTracks()[0]
-        });
-        this.events.onTrack?.(incomingStream, pId);
+      const stream = event.streams[0] || new MediaStream([event.track]);
+      switch (descriptor.source) {
+        case "camera":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            stream,
+            cameraTrack: event.track
+          });
+          break;
+        case "screen":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            screenStream: stream,
+            screenTrack: event.track,
+            isScreenSharing: true
+          });
+          break;
+        case "audio":
+          this.state.updateParticipantMedia(descriptor.publisher_id, {
+            stream,
+            audioTrack: event.track
+          });
+          break;
       }
     };
     this.subPC.onconnectionstatechange = () => {
@@ -431,7 +428,7 @@ var VideoSDKCore = class {
         this.joinRejecter = void 0;
         break;
       }
-      case "SFU_PUB_ANSWER": {
+      case "PUB_ANSWER": {
         if (this.pubPC) {
           await this.pubPC.setRemoteDescription({
             type: "answer",
@@ -440,7 +437,8 @@ var VideoSDKCore = class {
         }
         break;
       }
-      case "SFU_SUB_OFFER": {
+      case "SUB_OFFER": {
+        this.pendingTracks.push(msg.track);
         if (this.subPC) {
           await this.subPC.setRemoteDescription({
             type: "offer",
@@ -652,6 +650,9 @@ var VideoSDKCore = class {
       });
       this.isScreenSharing = true;
       const screenTrack = this.screenStream.getVideoTracks()[0];
+      Object.defineProperty(screenTrack, "contentHint", {
+        value: "detail"
+      });
       if (this.pubPC) {
         this.screenSender = this.pubPC.addTrack(screenTrack, this.screenStream);
         await this.createPublisherOffer();
@@ -671,7 +672,6 @@ var VideoSDKCore = class {
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
-        camera_id: this.localStream?.id.replace(/[{}]/g, ""),
         stream_id: this.screenStream.id.replace(/[{}]/g, "")
       });
       return this.screenStream;
@@ -687,17 +687,13 @@ var VideoSDKCore = class {
       throw err;
     }
   }
-  stopScreenShare() {
+  async stopScreenShare() {
     if (!this.screenStream) return;
     this.screenStream.getTracks().forEach((t) => t.stop());
     if (this.pubPC && this.screenSender) {
-      try {
-        this.pubPC.removeTrack(this.screenSender);
-        this.createPublisherOffer();
-      } catch (e) {
-        console.warn("Failed removing screen sender", e);
-      }
+      this.pubPC.removeTrack(this.screenSender);
       this.screenSender = null;
+      await this.createPublisherOffer();
     }
     this.screenStream = null;
     this.isScreenSharing = false;

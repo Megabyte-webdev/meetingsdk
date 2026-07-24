@@ -106,3 +106,9 @@ export type EntryRequest = {
   userId: string;
   name: string;
 };
+
+export interface TrackDescriptor {
+  id: string;
+  publisher_id: string;
+  source: "camera" | "screen" | "audio";
+}

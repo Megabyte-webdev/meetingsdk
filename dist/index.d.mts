@@ -127,6 +127,7 @@ declare class VideoSDKCore {
     private ws;
     private pubPC;
     private subPC;
+    private pendingTracks;
     private iceServers;
     private lastPong;
     private intentionalDisconnect;
@@ -157,7 +158,7 @@ declare class VideoSDKCore {
     toggleMic(): void;
     toggleCam(): void;
     startScreenShare(): Promise<MediaStream>;
-    stopScreenShare(): void;
+    stopScreenShare(): Promise<void>;
     sendChatMessage(payload: ChatInput): void;
     private scheduleReconnect;
     private startHeartbeat;
