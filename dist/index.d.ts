@@ -128,6 +128,8 @@ declare class VideoSDKCore {
     private pubPC;
     private subPC;
     private pendingTracks;
+    private subscriberNegotiating;
+    private subscriberOfferQueue;
     private iceServers;
     private lastPong;
     private intentionalDisconnect;
@@ -148,12 +150,14 @@ declare class VideoSDKCore {
     private pendingRequestId;
     private iceTransportPolicy;
     constructor(events?: Events, url?: string);
+    private acquireLocalMedia;
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
     joinMeeting(config: MeetingConfig): Promise<void>;
     private setupPublisherPC;
     private setupSubscriberPC;
     connect(roomId: string, name: string): Promise<void>;
     private handle;
+    private handleSubscriberOffer;
     private createPublisherOffer;
     toggleMic(): void;
     toggleCam(): void;
