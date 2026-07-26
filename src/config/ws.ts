@@ -1,4 +1,4 @@
 export const SDK_CONFIG = {
-  wsUrl: "wss://rust-video-server-sfyf.onrender.com/ws",
-  baseUrl: "https://rust-video-server-sfyf.onrender.com",
+  wsUrl: "wss://sfuserver-production.up.railway.app/ws",
+  baseUrl: "https://sfuserver-production.up.railway.app",
 };

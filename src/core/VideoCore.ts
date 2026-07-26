@@ -316,7 +316,7 @@ export class VideoSDKCore {
         break;
       }
 
-      case "SFU_PUB_ANSWER": {
+      case "PUB_ANSWER": {
         if (this.pubPC) {
           await this.pubPC.setRemoteDescription({
             type: "answer",
@@ -326,7 +326,7 @@ export class VideoSDKCore {
         break;
       }
 
-      case "SFU_SUB_OFFER": {
+      case "SUB_OFFER": {
         if (this.subPC) {
           await this.subPC.setRemoteDescription({
             type: "offer",
