@@ -1,158 +1,128 @@
-# 📹 @afosecure/meetingsdk — React Video Meeting SDK
+# 📹 MESHSDK
 
-A modern, lightweight React SDK for building peer-to-peer video communication applications using WebRTC. Designed with a clean, composable API and reactive state management.
+A lightweight React SDK for building peer-to-peer video conferencing applications using WebRTC Mesh networking. The SDK provides a modern React API, built-in meeting state management, screen sharing, chat, waiting room support, and flexible WebSocket signaling.
 
 ---
 
 ## Features
 
-- WebRTC peer-to-peer video (no central media server required)
-- React Hooks API for seamless integration
-- Reactive state system for participants & streams
-- Lightweight core optimized for performance
-- Flexible WebSocket signaling backend support
+- Peer-to-peer WebRTC Mesh architecture
+- HD audio and video
+- Screen sharing
+- Waiting room with host approval
+- Public and private in-meeting chat
+- Participant presence and media state
+- Automatic ICE restart & reconnection
+- STUN/TURN support
+- React Hooks API
 - Full TypeScript support
+- Lightweight with zero UI dependencies
 
 ---
 
-## 📦 Installation
+## Installation
 
 ```bash
-npm install @afosecure/meetingsdk
-# or
-yarn add @afosecure/meetingsdk
-# or
+npm install @afosecure/meshsdk
+```
+
+or
+
+```bash
 pnpm add @afosecure/meetingsdk
+```
+
+or
+
+```bash
+yarn add @afosecure/meetingsdk
 ```
 
 ---
 
-## Quick Start
+# Quick Start
 
-### 1. Initialize SDK
+## Create the SDK
 
 ```tsx
 import { useState } from "react";
-import {
-  MeetingProvider,
-  MeetingState,
-  VideoSDKCore,
-} from "@afosecure/meetingsdk";
+import { MeetingProvider, VideoSDKCore } from "@afosecure/meetingsdk";
 
-function App() {
-  const [core] = useState(
+export default function App() {
+  const [sdk] = useState(
     () =>
       new VideoSDKCore({
-        onTrack: (_, peerId) => {
-          console.log("📹 Received stream from:", peerId);
-        },
-        onUserJoined: (participant) => {
-          console.log("👤 User joined:", participant.name);
-        },
-        onUserLeft: (userId) => {
-          console.log("👤 User left:", userId);
-        },
+        onUserJoined: console.log,
+        onUserLeft: console.log,
+        onTrack: console.log,
       }),
   );
 
   return (
-    <MeetingProvider core={core}>
-      <VideoCall />
+    <MeetingProvider core={sdk}>
+      <Meeting />
     </MeetingProvider>
   );
 }
-
-export default App;
 ```
 
 ---
 
-### 2. Basic Video Call
+## Join a Meeting
 
 ```tsx
-import { useRef, useState } from "react";
-import { useMeeting, useParticipants } from "@afosecure/meetingsdk";
+import { useMeeting } from "@afosecure/meetingsdk";
 
-function VideoCall() {
-  const { join, startLocalStream, leave, localParticipant } = useMeeting();
-  const participants = useParticipants();
-  const localVideoRef = useRef<HTMLVideoElement>(null);
+export default function Meeting() {
+  const { joinMeeting, startLocalStream, leaveMeeting } = useMeeting();
 
-  const [roomId, setRoomId] = useState("");
-  const [name, setName] = useState("");
+  const join = async () => {
+    await startLocalStream(videoRef.current!, "John");
 
-  const handleJoin = async () => {
-    if (!localVideoRef.current) return;
-
-    await startLocalStream(localVideoRef.current, name);
-    await join(roomId, name);
+    await joinMeeting({
+      roomId: "room-123",
+      name: "John",
+    });
   };
 
   return (
-    <div>
-      {!localParticipant ? (
-        <>
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-          <input value={roomId} onChange={(e) => setRoomId(e.target.value)} />
-          <button onClick={handleJoin}>Join Meeting</button>
-        </>
-      ) : (
-        <>
-          <video ref={localVideoRef} autoPlay muted />
-          <button onClick={leave}>Leave</button>
+    <>
+      <button onClick={join}>Join</button>
 
-          {participants.map((p) => (
-            <div key={p.id}>{p.name}</div>
-          ))}
-        </>
-      )}
-    </div>
+      <button onClick={leaveMeeting}>Leave</button>
+    </>
   );
 }
 ```
 
 ---
 
-## Core Concepts
+# React Hooks
 
-### MeetingState
+## useMeeting()
+
+Provides meeting actions and local participant state.
 
 ```ts
-const state = new MeetingState();
-
-state.getParticipants();
-
-state.subscribe(() => {
-  console.log("updated");
-});
+const {
+  joinMeeting,
+  leaveMeeting,
+  toggleMic,
+  toggleCam,
+  startScreenShare,
+  stopScreenShare,
+  sendChatMessage,
+  participants,
+  localParticipant,
+  presenterId,
+} = useMeeting();
 ```
 
 ---
 
-### VideoSDKCore
+## useParticipants()
 
-```ts
-const core = new VideoSDKCore(state, {
-  onTrack: (stream, peerId) => {},
-  onUserJoined: (p) => {},
-  onUserLeft: (id) => {},
-});
-```
-
----
-
-## Hooks API
-
-### useMeeting()
-
-```ts
-const { join, startLocalStream, leave, localParticipant, meetingId } =
-  useMeeting();
-```
-
----
-
-### useParticipants()
+Returns all remote participants.
 
 ```ts
 const participants = useParticipants();
@@ -160,94 +130,244 @@ const participants = useParticipants();
 
 ---
 
-### useRemoteVideo()
-
-```tsx
-const ref = useRemoteVideo(participantId);
-
-return <video ref={ref} autoPlay />;
-```
-
----
-
-### useLocalStream()
+## useLocalParticipant()
 
 ```ts
-const stream = useLocalStream();
+const participant = useLocalParticipant();
 ```
 
 ---
 
-### useStreams()
+## useChat()
 
 ```ts
-const streams = useStreams();
+const { messages, sendChatMessage } = useChat();
 ```
 
 ---
 
-## Complete Example
+## useMeetingState()
 
-```tsx
-export default function App() {
-  const [state] = useState(() => new MeetingState());
+Subscribe to the underlying reactive meeting state.
 
-  const [core] = useState(
-    () =>
-      new VideoSDKCore(state, {
-        onTrack: () => {},
-        onUserJoined: () => {},
-        onUserLeft: () => {},
-      }),
-  );
+```ts
+const meeting = useMeetingState();
+```
 
-  return (
-    <MeetingProvider core={core}>
-      <VideoCallContent />
-    </MeetingProvider>
-  );
+---
+
+# Meeting Events
+
+```ts
+const sdk = new VideoSDKCore({
+  onTrack(stream, participantId) {},
+
+  onUserJoined(participant) {},
+
+  onUserLeft(participantId) {},
+
+  onChatMessage(message) {},
+
+  onScreenShareStarted(id, stream) {},
+
+  onScreenShareStopped(id) {},
+
+  onMicToggled(id, enabled) {},
+
+  onCamToggled(id, enabled) {},
+
+  onMeetingLeft() {},
+
+  onError(error) {},
+});
+```
+
+---
+
+# Features
+
+## Audio & Video
+
+- Camera
+- Microphone
+- Mute / Unmute
+- Camera On / Off
+
+---
+
+## Screen Sharing
+
+```ts
+await startScreenShare();
+
+stopScreenShare();
+```
+
+Supports:
+
+- Presenter detection
+- Automatic renegotiation
+- Browser stop-share handling
+
+---
+
+## Waiting Room
+
+Supports:
+
+- Join requests
+- Host approval
+- Host rejection
+- Rejoin after approval
+
+Events:
+
+```ts
+onEntryRequested();
+
+onEntryResponded();
+```
+
+---
+
+## Chat
+
+Supports:
+
+- Public messages
+- Private messages
+- Replies
+- Optimistic updates
+
+```ts
+sendChatMessage({
+  message: "Hello everyone!",
+});
+```
+
+---
+
+# Architecture
+
+```
+Participant A
+       │
+       │
+   WebSocket
+(Signaling Only)
+       │
+Participant B
+
+Media
+──────────────►
+Direct WebRTC
+Peer Connection
+```
+
+Media never passes through the signaling server.
+
+The WebSocket server is only responsible for:
+
+- room management
+- participant discovery
+- signaling
+- waiting room
+- ICE exchange
+
+---
+
+# Server Requirements
+
+Your signaling server should support the following messages.
+
+## Client → Server
+
+- JOIN
+- LEAVE
+- OFFER
+- ANSWER
+- ICE
+- CHAT_MESSAGE
+- MEDIA_STATE
+- SCREEN_SHARE_START
+- SCREEN_SHARE_STOP
+- JOIN_APPROVE
+- JOIN_REJECT
+- PING
+
+---
+
+## Server → Client
+
+- JOINED
+- EXISTING_USERS
+- USER_JOINED
+- USER_LEFT
+- OFFER
+- ANSWER
+- ICE
+- CHAT_MESSAGE
+- MEDIA_STATE_CHANGE
+- SCREEN_SHARE_START
+- SCREEN_SHARE_STOP
+- JOIN_PENDING
+- JOIN_APPROVED
+- JOIN_REJECTED
+- ERROR
+- PONG
+
+---
+
+# STUN & TURN
+
+The SDK expects the signaling server to provide ICE servers during the JOIN flow.
+
+Example:
+
+```json
+{
+  "iceServers": [
+    {
+      "urls": ["stun:stun.l.google.com:19302"]
+    },
+    {
+      "urls": ["turn:turn.example.com:3478"],
+      "username": "...",
+      "credential": "..."
+    }
+  ]
 }
 ```
 
 ---
 
-## Server Requirements
+# Browser Support
 
-Your WebSocket server must support:
-
-### Client → Server
-
-- JOIN
-- OFFER
-- ANSWER
-- ICE
-
-### Server → Client
-
-- EXISTING_USERS
-- USER_JOINED
-- USER_LEFT
+- Chrome
+- Edge
+- Firefox
+- Safari
 
 ---
 
-## Performance Tips
+# Mesh Networking
 
-- Stop media tracks on leave
-- Memoize participant components
-- Use multiple STUN servers
-- Avoid re-rendering video elements
+This SDK uses a Mesh topology.
+
+Every participant establishes a direct WebRTC connection with every other participant.
+
+Best suited for:
+
+- One-to-one calls
+- Interviews
+- Online consultations
+- Small meetings
+- Team discussions
+
+For larger meetings (10+ participants), an SFU architecture is recommended.
 
 ---
 
-## Browser Support
-
-- Chrome 54+
-- Firefox 55+
-- Safari 11+
-- Edge 79+
-
----
-
-## 📄 License
+# License
 
 MIT

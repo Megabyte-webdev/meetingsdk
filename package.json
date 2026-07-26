@@ -1,6 +1,6 @@
 {
-  "name": "@afosecure/meetingsdk",
-  "version": "1.4.4",
+  "name": "meshsdk",
+  "version": "0.1.0",
   "description": "A modern, lightweight React SDK for building peer-to-peer video communication applications. Built on WebRTC with a clean, composable rust API.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -33,7 +33,8 @@
     "react",
     "meeting",
     "video",
-    "conference",
+    "mesh",
+    "peer",
     "webrtc",
     "sdk",
     "rust",
@@ -43,13 +44,13 @@
   ],
   "author": "Afolabi Mubarak",
   "license": "MIT",
-  "homepage": "https://github.com/Megabyte-webdev/meetingsdk",
+  "homepage": "https://github.com/Megabyte-webdev/meshsdk",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Megabyte-webdev/meetingsdk.git"
+    "url": "git+https://github.com/Megabyte-webdev/meshsdk.git"
   },
   "bugs": {
-    "url": "https://github.com/Megabyte-webdev/meetingsdk/issues"
+    "url": "https://github.com/Megabyte-webdev/meshsdk/issues"
   },
   "peerDependencies": {
     "react": ">=18",
