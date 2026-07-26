@@ -6,7 +6,6 @@ import {
   MeetingConfig,
   Participant,
   SDKError,
-  TrackDescriptor,
 } from "../types/meeting";
 import { MeetingState } from "./MeetingState";
 
@@ -114,10 +113,8 @@ export class VideoSDKCore {
         name: this.participantName,
         media: {
           stream: this.localStream,
-          cameraTrack,
-          audioTrack,
-          micEnabled,
-          camEnabled,
+          micEnabled: true,
+          camEnabled: true,
           isScreenSharing: false,
         },
       });
@@ -199,22 +196,10 @@ export class VideoSDKCore {
 
     // Reuse existing stream if initLocal already configured it
     if (!this.localStream) {
-      const acquired = await this.acquireLocalMedia({
-        videoConstraints: !videoMuted,
-        audioConstraints: !audioMuted,
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
       });
-
-      this.localStream = acquired.stream;
-      console.log(
-        "[LOCAL MEDIA]",
-        this.localStream.getTracks().map((t) => ({
-          kind: t.kind,
-          enabled: t.enabled,
-          ready: t.readyState,
-        })),
-      );
-      camEnabled = acquired.camEnabled && !videoMuted;
-      micEnabled = acquired.micEnabled && !audioMuted;
     }
 
     this.localStream.getAudioTracks().forEach((t) => {
@@ -229,10 +214,8 @@ export class VideoSDKCore {
       name: this.participantName,
       media: {
         stream: this.localStream,
-        cameraTrack,
-        audioTrack,
-        micEnabled,
-        camEnabled,
+        micEnabled: !audioMuted,
+        camEnabled: !videoMuted,
         isScreenSharing: false,
       },
     });
@@ -791,20 +774,12 @@ export class VideoSDKCore {
       }
     };
 
-    pc.onconnectionstatechange = async () => {
-      console.log(`[PC STATE] ${id}`, pc.connectionState);
-
-      if (
-        pc.connectionState === "failed" ||
-        pc.iceConnectionState === "failed"
-      ) {
-        console.warn(`[ICE FAILED] Restarting connection with ${id}`);
-
-        await this.restartPeerIce(id);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") {
+        try {
+          pc.restartIce();
+        } catch {}
       }
-    };
-    pc.onicegatheringstatechange = () => {
-      console.log(`[ICE GATHERING] ${id}`, pc.iceGatheringState);
     };
 
     this.localStream.getTracks().forEach((track) => {
@@ -824,7 +799,7 @@ export class VideoSDKCore {
 
   // ---------------- OFFER ----------------
   private async createOffer(id: string, isRenegotiation = false) {
-    if (!this.shouldInitiate(id)) {
+    if (!isRenegotiation && !this.shouldInitiate(id)) {
       console.debug(
         `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`,
       );
@@ -891,9 +866,7 @@ export class VideoSDKCore {
           console.warn(
             `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`,
           );
-          await pc.setLocalDescription({
-            type: "rollback",
-          });
+          return; // Ignore their offer, wait for their ANSWER
         } else {
           // THEY WIN: Roll back and accept their offer
           console.warn(
@@ -959,6 +932,7 @@ export class VideoSDKCore {
       );
     }
   }
+
   // ---------------- CLEANUP ----------------
   private closePeer(id: string) {
     const pc = this.peers[id];
@@ -1023,6 +997,7 @@ export class VideoSDKCore {
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
+        camera_id: this.localStream?.id.replace(/[{}]/g, ""),
         stream_id: this.screenStream.id.replace(/[{}]/g, ""),
       });
 
@@ -1041,7 +1016,7 @@ export class VideoSDKCore {
     }
   }
 
-  async stopScreenShare() {
+  stopScreenShare() {
     if (!this.screenStream) return;
 
     this.screenStream.getTracks().forEach((t) => t.stop());
@@ -1169,34 +1144,6 @@ export class VideoSDKCore {
 
     this.state.clearChat();
     this.state.setPresenterId(null);
-  }
-
-  private async restartPeerIce(id: string) {
-    const pc = this.peers[id];
-
-    if (!pc) return;
-
-    try {
-      pc.restartIce();
-
-      const offer = await pc.createOffer({
-        iceRestart: true,
-      });
-
-      await pc.setLocalDescription(offer);
-
-      this.send({
-        type: "OFFER",
-        payload: offer.sdp,
-        sender: this.myId,
-        target: id,
-        iceRestart: true,
-      });
-
-      console.log(`[ICE RESTART] offer sent to ${id}`);
-    } catch (err) {
-      console.error(`[ICE RESTART FAILED] ${id}`, err);
-    }
   }
 
   private async flushIce(id: string, pc: RTCPeerConnection) {
