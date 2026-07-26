@@ -11,34 +11,59 @@ import { MeetingState } from "./MeetingState";
 
 export class VideoSDKCore {
   private ws: WebSocket | null = null;
-  private pubPC: RTCPeerConnection | null = null;
-  private subPC: RTCPeerConnection | null = null;
-
-  private iceServers: RTCIceServer[] = [];
+  private peers: Record<string, RTCPeerConnection> = {};
+  private initiators = new Set<string>();
   private lastPong = Date.now();
+  private iceServers: RTCIceServer[] = [];
   private intentionalDisconnect = false;
+
   private myId: string;
   private room: { id: string | null; name: string | null } = {
     id: null,
     name: null,
   };
-
   private localStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
-  private screenSender: RTCRtpSender | null = null;
   private isScreenSharing = false;
+  private screenSenders: Record<string, RTCRtpSender[]> = {};
 
   private pingInterval: any = null;
+  private pendingIceCandidates: Record<string, RTCIceCandidateInit[]> = {};
+  private pendingOffers: Record<string, string> = {};
   private reconnectAttempts = 0;
   private reconnectTimer?: number;
   private participantName = "";
   public readonly state: MeetingState;
-
   private joinResolver?: () => void;
   private joinRejecter?: (e: any) => void;
+
+  // Track if we're in the waiting room (pending approval)
   private isWaitingForApproval = false;
   private pendingRequestId: string | null = null;
   private iceTransportPolicy: RTCIceTransportPolicy = "all";
+
+  private emitError(
+    code: string,
+    message: string,
+    raw?: any,
+    recoverable = true,
+  ) {
+    const err: SDKError = {
+      code,
+      message,
+      raw,
+      roomId: this.room.id,
+      userId: this.myId,
+      recoverable,
+    };
+
+    this.events.onError?.(err);
+
+    this.joinRejecter?.(err);
+    this.joinRejecter = undefined;
+
+    console.error("[MeetingSDK Error]", err);
+  }
 
   constructor(
     private events: Events = {},
@@ -47,16 +72,22 @@ export class VideoSDKCore {
     this.state = new MeetingState();
     this.events = events;
     this.url = url;
+
     this.myId = localStorage.getItem("vsdk_id") || crypto.randomUUID();
+
     localStorage.setItem("vsdk_id", this.myId);
   }
 
-  // ---------------- MEDIA SETUP ----------------
+  // ---------------- STREAM ----------------
   async initLocal(video: HTMLVideoElement, name: string) {
     this.participantName = name;
+
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -64,6 +95,7 @@ export class VideoSDKCore {
         },
       });
 
+      // Verify tracks are actually live BEFORE connecting
       const hasVideo = this.localStream
         .getVideoTracks()
         .some((t) => t.readyState === "live");
@@ -94,143 +126,10 @@ export class VideoSDKCore {
     }
   }
 
-  async joinMeeting(config: MeetingConfig) {
-    const { roomId, name, audioMuted = false, videoMuted = false } = config;
-    if (!roomId || !name) {
-      throw new Error("roomId and name are required to join meeting");
-    }
-    this.participantName = name;
-
-    if (!this.localStream) {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
-    }
-
-    this.localStream.getAudioTracks().forEach((t) => (t.enabled = !audioMuted));
-    this.localStream.getVideoTracks().forEach((t) => (t.enabled = !videoMuted));
-
-    this.state.updateLocalParticipant({
-      id: this.myId,
-      name: this.participantName,
-      media: {
-        stream: this.localStream,
-        micEnabled: !audioMuted,
-        camEnabled: !videoMuted,
-        isScreenSharing: false,
-      },
-    });
-
-    this.state.localStream = this.localStream;
-    await this.connect(roomId, name);
-  }
-
-  // ---------------- SFU PEER CONNECTION CREATION ----------------
-  private setupPublisherPC() {
-    if (!this.localStream) return;
-
-    this.pubPC = new RTCPeerConnection({
-      iceServers: this.iceServers,
-      iceTransportPolicy: this.iceTransportPolicy,
-    });
-
-    // Add local tracks to Publisher PC
-    this.localStream.getTracks().forEach((track) => {
-      this.pubPC?.addTrack(track, this.localStream!);
-    });
-
-    this.pubPC.onicecandidate = (e) => {
-      if (e.candidate) {
-        this.send({
-          type: "PUB_ICE",
-          payload: JSON.stringify(e.candidate),
-          user_id: this.myId,
-        });
-      }
-    };
-
-    this.pubPC.onconnectionstatechange = () => {
-      console.log(`[SFU Publisher PC State]`, this.pubPC?.connectionState);
-      if (this.pubPC?.connectionState === "failed") {
-        this.restartPublisherIce();
-      }
-    };
-  }
-
-  private setupSubscriberPC() {
-    this.subPC = new RTCPeerConnection({
-      iceServers: this.iceServers,
-      iceTransportPolicy: this.iceTransportPolicy,
-    });
-
-    this.subPC.onicecandidate = (e) => {
-      if (e.candidate) {
-        this.send({
-          type: "SUB_ICE",
-          payload: JSON.stringify(e.candidate),
-          user_id: this.myId,
-        });
-      }
-    };
-
-    this.subPC.ontrack = (event) => {
-      const incomingStream = event.streams[0] || new MediaStream([event.track]);
-      const streamId = incomingStream.id.replace(/[{}]/g, "");
-
-      // Find participant that owns this stream ID
-      let matchedParticipant: Participant | undefined;
-      for (const p of this.state.participants.values()) {
-        if (
-          p.media?.cameraStreamId === streamId ||
-          p.media?.remoteScreenStreamId === streamId
-        ) {
-          matchedParticipant = p;
-          break;
-        }
-      }
-
-      if (!matchedParticipant) {
-        console.warn(
-          `[SFU ontrack] Dynamic track received for stream ${streamId}`,
-        );
-        return;
-      }
-
-      const pId = matchedParticipant.id;
-      const isScreen =
-        streamId === matchedParticipant.media?.remoteScreenStreamId;
-
-      if (isScreen) {
-        this.state.updateParticipantMedia(pId, {
-          screenStream: incomingStream,
-          screenTrack: event.track,
-          isScreenSharing: true,
-        });
-
-        if (!this.state.presenterId) {
-          this.state.setPresenterId(pId);
-        }
-
-        this.events.onScreenShareStarted?.(pId, incomingStream);
-      } else {
-        this.state.updateParticipantMedia(pId, {
-          stream: incomingStream,
-          cameraTrack: incomingStream.getVideoTracks()[0],
-          audioTrack: incomingStream.getAudioTracks()[0],
-        });
-        this.events.onTrack?.(incomingStream, pId);
-      }
-    };
-
-    this.subPC.onconnectionstatechange = () => {
-      console.log(`[SFU Subscriber PC State]`, this.subPC?.connectionState);
-    };
-  }
-
-  // ---------------- WEBSOCKET CONNECTION & SIGNALING ----------------
+  // ---------------- CONNECT ----------------
   async connect(roomId: string, name: string) {
     this.room.id = roomId;
+
     this.reset();
 
     return new Promise<void>((resolve, reject) => {
@@ -239,18 +138,15 @@ export class VideoSDKCore {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
-        console.log("WebSocket connected to SFU, sending JOIN...");
-        const micEnabled = !!this.state.localParticipant?.media?.micEnabled;
-        const camEnabled = !!this.state.localParticipant?.media?.camEnabled;
-
+        console.log("WebSocket connected, sending JOIN...");
         this.send({
           type: "JOIN",
           room_id: roomId,
           user_id: this.myId,
           sender_name: name,
           camera_stream_id: this.localStream?.id.replace(/[{}]/g, ""),
-          audio_muted: !micEnabled,
-          video_muted: !camEnabled,
+          audio_muted: this.state.localParticipant?.media?.micEnabled,
+          video_muted: this.state.localParticipant?.media?.camEnabled,
         });
       };
 
@@ -264,16 +160,22 @@ export class VideoSDKCore {
           message: "Connection closed before join completed",
           raw: e,
         });
+
         this.joinRejecter = undefined;
 
-        if (
-          this.intentionalDisconnect ||
-          e.code === 1000 ||
-          e.code === 1001 ||
-          this.isWaitingForApproval
-        ) {
+        if (this.intentionalDisconnect) {
+          return; // do NOT reconnect
+        }
+
+        if (e.code === 1000 || e.code === 1001) {
           return;
         }
+
+        // Don't auto-reconnect if waiting for approval (user must reconnect after approval)
+        if (this.isWaitingForApproval) {
+          return;
+        }
+
         this.scheduleReconnect();
       };
 
@@ -283,6 +185,178 @@ export class VideoSDKCore {
     });
   }
 
+  async joinMeeting(config: MeetingConfig) {
+    const { roomId, name, audioMuted = false, videoMuted = false } = config;
+
+    if (!roomId || !name) {
+      throw new Error("roomId and name are required to join meeting");
+    }
+
+    this.participantName = name;
+
+    // Reuse existing stream if initLocal already configured it
+    if (!this.localStream) {
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+    }
+
+    this.localStream.getAudioTracks().forEach((t) => {
+      t.enabled = !audioMuted;
+    });
+    this.localStream.getVideoTracks().forEach((t) => {
+      t.enabled = !videoMuted;
+    });
+
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        stream: this.localStream,
+        micEnabled: !audioMuted,
+        camEnabled: !videoMuted,
+        isScreenSharing: false,
+      },
+    });
+
+    this.state.localStream = this.localStream;
+
+    await this.connect(roomId, name);
+  }
+
+  getMeeting(): { id: string | null; name: string | null } {
+    return this.room;
+  }
+
+  toggleMic() {
+    const mediaState = this.state.localParticipant?.media;
+    if (!mediaState) return;
+
+    const nextEnabled = !mediaState.micEnabled;
+
+    this.localStream
+      ?.getAudioTracks()
+      .forEach((t) => (t.enabled = nextEnabled));
+
+    // Update state layer
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        ...mediaState,
+        micEnabled: nextEnabled,
+      },
+    });
+
+    // Notify peers
+    this.send({
+      type: "MEDIA_STATE",
+      kind: "audio",
+      enabled: nextEnabled,
+    });
+  }
+
+  toggleCam() {
+    const mediaState = this.state.localParticipant?.media;
+    if (!mediaState) return;
+
+    const nextEnabled = !mediaState.camEnabled;
+
+    this.localStream
+      ?.getVideoTracks()
+      .forEach((t) => (t.enabled = nextEnabled));
+
+    // Update state layer
+    this.state.updateLocalParticipant({
+      id: this.myId,
+      name: this.participantName,
+      media: {
+        ...mediaState,
+        camEnabled: nextEnabled,
+      },
+    });
+
+    // Notify peers
+    this.send({
+      type: "MEDIA_STATE",
+      kind: "video",
+      enabled: nextEnabled,
+    });
+  }
+
+  private scheduleReconnect() {
+    if (!this.room.id) return;
+
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+
+    clearTimeout(this.reconnectTimer);
+
+    this.reconnectTimer = window.setTimeout(async () => {
+      try {
+        await this.connect(this.room.id!, this.participantName);
+
+        this.reconnectAttempts = 0;
+      } catch {
+        this.reconnectAttempts++;
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+
+    this.pingInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+      this.send({
+        type: "PING",
+        client_ts: Date.now(),
+      });
+    }, 20000); // every 20s
+  }
+  private stopHeartbeat() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  // ---------------- RESET ----------------
+  private reset() {
+    Object.values(this.peers).forEach((pc) => pc.close());
+
+    this.peers = {};
+    this.initiators.clear();
+    this.pendingIceCandidates = {};
+
+    this.state.resetRemoteState();
+  }
+
+  private async handleJoinApproved(msg: any) {
+    console.log("JOIN_APPROVED received, sending new JOIN...");
+
+    this.events.onEntryResponded?.({
+      participantId: msg.user_id,
+      decision: "approved",
+    });
+
+    this.isWaitingForApproval = false;
+    this.pendingRequestId = null;
+
+    // Send JOIN again on SAME socket
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.send({
+        type: "JOIN",
+        room_id: this.room.id,
+        user_id: this.myId,
+        sender_name: this.participantName,
+      });
+      console.log("Sent new JOIN after approval");
+    }
+  }
+
   private async handle(msg: any) {
     if (msg.sender === this.myId) return;
 
@@ -290,80 +364,78 @@ export class VideoSDKCore {
       case "PONG":
         this.lastPong = Date.now();
         break;
-
-      case "JOINED": {
-        if (msg.iceServers) {
-          this.iceServers = msg.iceServers;
-        }
-        this.room.name = msg.room_name;
-
-        this.isWaitingForApproval = false;
-        this.pendingRequestId = null;
-        this.intentionalDisconnect = false;
-        this.reconnectAttempts = 0;
-
-        // Initialize Publisher and Subscriber PeerConnections with SFU
-        this.setupPublisherPC();
-        this.setupSubscriberPC();
-
-        // Create initial Publisher Offer to send client streams to SFU
-        await this.createPublisherOffer();
-
-        this.startHeartbeat();
-        this.joinResolver?.();
-        this.joinResolver = undefined;
-        this.joinRejecter = undefined;
+      case "OFFER":
+        console.log("[Offer] Received from", msg.sender, {
+          sdp: msg.payload.substring(0, 200),
+        });
+        await this.handleOffer(msg.payload, msg.sender);
         break;
-      }
 
-      case "SFU_PUB_ANSWER": {
-        if (this.pubPC) {
-          await this.pubPC.setRemoteDescription({
+      case "ANSWER": {
+        const pc = this.peers[msg.sender];
+        console.log("[Answer] Received from", msg.sender, {
+          signalingState: pc?.signalingState,
+          iceConnectionState: pc?.iceConnectionState,
+          connectionState: pc?.connectionState,
+        });
+
+        if (!pc) return;
+
+        if (pc.signalingState !== "have-local-offer") {
+          console.warn(
+            `[Signaling] Unexpected ANSWER in state "${pc.signalingState}", ignoring`,
+          );
+          return;
+        }
+
+        try {
+          await pc.setRemoteDescription({
             type: "answer",
             sdp: msg.payload,
           });
+
+          await this.flushIce(msg.sender, pc);
+        } catch (err) {
+          console.error("[Signaling] Failed to apply answer:", err);
+          this.emitError(
+            "ANSWER_FAILED",
+            `Failed to apply answer from ${msg.sender}`,
+            err,
+            true,
+          );
         }
         break;
       }
+      case "ICE": {
+        const candidate = JSON.parse(msg.payload);
 
-      case "SFU_SUB_OFFER": {
-        if (this.subPC) {
-          await this.subPC.setRemoteDescription({
-            type: "offer",
-            sdp: msg.payload,
-          });
-          const answer = await this.subPC.createAnswer();
-          await this.subPC.setLocalDescription(answer);
+        let pc = this.peers[msg.sender];
 
-          this.send({
-            type: "SUB_ANSWER",
-            payload: answer.sdp,
-            user_id: this.myId,
-          });
+        if (!pc) {
+          this.pendingIceCandidates[msg.sender] ??= [];
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
         }
+
+        if (!pc.remoteDescription) {
+          this.pendingIceCandidates[msg.sender] ??= [];
+          this.pendingIceCandidates[msg.sender].push(candidate);
+          break;
+        }
+
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (err) {
+          console.warn("ICE error:", err);
+        }
+
         break;
       }
-
-      case "PUB_ICE": {
-        if (this.pubPC && msg.payload) {
-          await this.pubPC
-            .addIceCandidate(JSON.parse(msg.payload))
-            .catch(console.warn);
-        }
-        break;
-      }
-
-      case "SUB_ICE": {
-        if (this.subPC && msg.payload) {
-          await this.subPC
-            .addIceCandidate(JSON.parse(msg.payload))
-            .catch(console.warn);
-        }
-        break;
-      }
-
-      case "EXISTING_USERS": {
+      case "EXISTING_USERS":
         if (msg.presenterId) {
+          this.state.setPresenterId(msg.presenterId);
+
+          this.events.onScreenShareStarted?.(msg.presenterId, null!);
           this.state.setPresenterId(msg.presenterId);
         }
 
@@ -377,6 +449,9 @@ export class VideoSDKCore {
             media: {
               stream: null,
               screenStream: undefined,
+              cameraTrack: undefined,
+              screenTrack: undefined,
+              audioTrack: undefined,
               micEnabled: p.micEnabled ?? true,
               camEnabled: p.camEnabled ?? true,
               isScreenSharing: p.isScreenSharing ?? false,
@@ -386,24 +461,135 @@ export class VideoSDKCore {
           };
           this.state.addParticipant(structuredParticipant);
           this.events.onUserJoined?.(structuredParticipant);
+
+          if (p.isScreenSharing && p.remoteScreenStreamId) {
+            this.state.setPresenterId(p.id);
+            this.state.updateParticipantMedia(p.id, {
+              isScreenSharing: true,
+              remoteScreenStreamId: p.remoteScreenStreamId,
+              cameraStreamId: p.cameraId || null,
+            });
+          }
+          if (this.shouldInitiate(p.id)) {
+            await this.createOffer(p.id);
+          }
         }
         break;
-      }
 
+      case "JOINED": {
+        if (msg.iceServers) {
+          this.iceServers = msg.iceServers;
+        }
+        this.room.name = msg.room_name;
+
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
+        this.intentionalDisconnect = false;
+        this.reconnectAttempts = 0;
+
+        // Process any OFFERs that arrived before JOINED
+        if (Object.keys(this.pendingOffers).length > 0) {
+          console.log(
+            "Processing",
+            Object.keys(this.pendingOffers).length,
+            "pending offers",
+          );
+          for (const [peerId, sdp] of Object.entries(this.pendingOffers)) {
+            await this.handleOffer(sdp, peerId);
+          }
+          this.pendingOffers = {};
+        }
+
+        const media = this.state.localParticipant?.media;
+
+        if (media) {
+          this.send({
+            type: "MEDIA_STATE",
+            kind: "audio",
+            enabled: !!media.micEnabled,
+          });
+
+          this.send({
+            type: "MEDIA_STATE",
+            kind: "video",
+            enabled: !!media.camEnabled,
+          });
+        }
+        this.startHeartbeat();
+        this.joinResolver?.();
+        this.joinResolver = undefined;
+        this.joinRejecter = undefined;
+        break;
+      }
       case "USER_JOINED": {
         const p = msg.participant;
+
         if (!p?.id || p.id === this.myId) return;
+
         this.state.addParticipant(p);
+
         this.events.onUserJoined?.(p);
+        if (this.shouldInitiate(p.id)) {
+          await this.createOffer(p.id);
+        }
+
         break;
       }
 
-      case "USER_LEFT": {
-        const peerId = msg.participant.id;
-        this.state.removeParticipant(peerId);
-        this.events.onUserLeft?.(peerId);
+      case "JOIN_PENDING": {
+        const req = msg.request;
+
+        this.isWaitingForApproval = true;
+        this.pendingRequestId = req.request_id;
+
+        this.events.onEntryRequested?.({
+          requestId: req.request_id,
+          userId: req.user_id,
+          name: req.name,
+        });
+
         break;
       }
+
+      case "JOIN_REQUEST": {
+        const req = msg.request;
+        this.events.onEntryRequested?.({
+          requestId: req.id,
+          userId: req.user_id,
+          name: req.name,
+        });
+
+        break;
+      }
+
+      case "JOIN_APPROVED": {
+        await this.handleJoinApproved(msg);
+        break;
+      }
+
+      case "JOIN_REJECTED": {
+        const decision = "rejected";
+
+        this.isWaitingForApproval = false;
+        this.pendingRequestId = null;
+
+        this.events.onEntryResponded?.({
+          participantId: msg.user_id,
+          decision,
+        });
+
+        break;
+      }
+
+      case "USER_LEFT":
+        const peerId = msg.participant.id;
+        this.closePeer(peerId);
+
+        this.state.removeParticipant(peerId);
+
+        this.events.onUserLeft?.(peerId);
+
+        break;
 
       case "MEDIA_STATE_CHANGE": {
         const peerId = msg.peerId;
@@ -416,11 +602,29 @@ export class VideoSDKCore {
           this.state.updateParticipantMedia(peerId, { camEnabled: enabled });
           this.events.onCamToggled?.(peerId, enabled);
         }
+
         break;
       }
 
+      case "CHAT_MESSAGE": {
+        const newMsg = msg.data;
+
+        if (newMsg.sender_id === this.myId) break; // already added optimistically
+        this.state.addChatMessage({
+          id: newMsg.id,
+          text: newMsg.message,
+          sender_id: newMsg.sender_id,
+          sender_name: newMsg.sender_name,
+          timestamp: new Date(newMsg.timestamp).getTime(),
+          target: newMsg.target,
+        });
+
+        this.events.onChatMessage?.(msg);
+        break;
+      }
       case "SCREEN_SHARE_START": {
         const peerId = msg.peerId;
+
         this.state.updateParticipantMedia(peerId, {
           isScreenSharing: true,
           remoteScreenStreamId: msg.stream_id,
@@ -430,6 +634,11 @@ export class VideoSDKCore {
         if (!this.state.presenterId) {
           this.state.setPresenterId(peerId);
         }
+
+        const screenStream =
+          this.state.getParticipant(peerId)?.media?.screenStream;
+
+        this.events.onScreenShareStarted?.(peerId, screenStream || null!);
         break;
       }
 
@@ -442,161 +651,356 @@ export class VideoSDKCore {
         this.events.onScreenShareStopped?.(peerId);
         break;
       }
-
-      case "CHAT_MESSAGE": {
-        const newMsg = msg.data;
-        if (newMsg.sender_id === this.myId) break;
-        this.state.addChatMessage({
-          id: newMsg.id,
-          text: newMsg.message,
-          sender_id: newMsg.sender_id,
-          sender_name: newMsg.sender_name,
-          timestamp: new Date(newMsg.timestamp).getTime(),
-          target: newMsg.target,
-        });
-        this.events.onChatMessage?.(msg);
-        break;
-      }
-
-      case "JOIN_PENDING": {
-        const req = msg.request;
-        this.isWaitingForApproval = true;
-        this.pendingRequestId = req.request_id;
-        this.events.onEntryRequested?.({
-          requestId: req.request_id,
-          userId: req.user_id,
-          name: req.name,
-        });
-        break;
-      }
-
-      case "JOIN_APPROVED": {
-        this.isWaitingForApproval = false;
-        this.pendingRequestId = null;
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.send({
-            type: "JOIN",
-            room_id: this.room.id,
-            user_id: this.myId,
-            sender_name: this.participantName,
-          });
-        }
-        break;
-      }
-
-      case "JOIN_REJECTED": {
-        this.isWaitingForApproval = false;
-        this.pendingRequestId = null;
-        this.events.onEntryResponded?.({
-          participantId: msg.user_id,
-          decision: "rejected",
-        });
-        break;
-      }
-
       case "ERROR": {
         const fatal = msg?.fatal === true;
+
         this.emitError(
           "WS_ERROR",
           msg?.message || "Unknown error",
           msg,
           !fatal,
         );
-        if (fatal) this.disconnect();
+
+        if (fatal) {
+          this.disconnect();
+        }
+
         return;
       }
     }
   }
 
-  // ---------------- PUBLISHER RENEGOTIATION ----------------
-  private async createPublisherOffer() {
-    if (!this.pubPC) return;
+  // ---------------- PEER ----------------
+  private createPeer(id: string) {
+    if (!this.localStream) throw new Error("No local stream");
+    if (!this.iceServers || this.iceServers.length === 0) {
+      throw new Error(
+        "ICE Servers not configured. Backend must provide iceServers on JOIN.",
+      );
+    }
+
+    const pc = new RTCPeerConnection({
+      iceServers: this.iceServers,
+      iceTransportPolicy: this.iceTransportPolicy,
+    });
+
+    pc.ontrack = (event) => {
+      const incomingStream =
+        event.streams?.[0] || new MediaStream([event.track]);
+      const streamId = incomingStream?.id?.replace(/[{}]/g, "");
+
+      const participant = this.state.getParticipant(id);
+
+      const isCameraStream =
+        streamId &&
+        participant?.media?.cameraStreamId &&
+        streamId === participant?.media?.cameraStreamId;
+
+      const isScreenStream =
+        streamId &&
+        participant?.media?.remoteScreenStreamId &&
+        streamId === participant?.media?.remoteScreenStreamId;
+
+      if (event.track.muted) {
+        event.track.onunmute = () => {
+          console.log(`${event.track.kind} track unmuted for ${id}`);
+        };
+      }
+
+      if (isScreenStream) {
+        const videoTrack =
+          event.track.kind === "video"
+            ? event.track
+            : incomingStream.getVideoTracks()[0] ||
+              participant?.media?.screenTrack;
+
+        this.state.updateParticipantMedia(id, {
+          screenStream: incomingStream,
+          screenTrack: videoTrack,
+          remoteScreenStreamId: incomingStream.id,
+          isScreenSharing: true,
+        });
+
+        if (!this.state.presenterId) {
+          this.state.setPresenterId(id);
+        }
+
+        this.events.onScreenShareStarted?.(id, incomingStream);
+        console.log(`Screen share stream detected for ${id}`);
+      } else if (isCameraStream) {
+        this.state.updateParticipantMedia(id, {
+          stream: incomingStream,
+          cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0],
+        });
+        this.events.onTrack?.(incomingStream, id);
+      } else {
+        this.state.updateParticipantMedia(id, {
+          stream: incomingStream,
+          cameraTrack: incomingStream.getVideoTracks()[0],
+          audioTrack: incomingStream.getAudioTracks()[0],
+        });
+        this.events.onTrack?.(incomingStream, id);
+      }
+    };
+
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) return;
+
+      console.log("LOCAL ICE:", e.candidate.candidate);
+      this.send({
+        type: "ICE",
+        payload: JSON.stringify(e.candidate),
+        sender: this.myId,
+        target: id,
+      });
+    };
+
+    pc.oniceconnectionstatechange = async () => {
+      console.log("================================");
+      console.log(`Peer: ${id}`);
+      console.log(`ICE: ${pc.iceConnectionState}`);
+      console.log(`Connection: ${pc.connectionState}`);
+      console.log(`Signaling: ${pc.signalingState}`);
+
+      if (pc.iceConnectionState === "disconnected") {
+        const stats = await pc.getStats();
+
+        stats.forEach((report) => {
+          if (report.type === "transport") {
+            console.log(JSON.stringify(report, null, 2));
+          }
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = async () => {
+      console.log(`[PC STATE] ${id}`, pc.connectionState);
+
+      if (
+        pc.connectionState === "failed" ||
+        pc.iceConnectionState === "failed"
+      ) {
+        console.warn(`[ICE FAILED] Restarting connection with ${id}`);
+
+        await this.restartPeerIce(id);
+      }
+    };
+    pc.onicegatheringstatechange = () => {
+      console.log(`[ICE GATHERING] ${id}`, pc.iceGatheringState);
+    };
+
+    this.localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, this.localStream!);
+    });
+
+    if (this.isScreenSharing && this.screenStream) {
+      this.screenSenders[id] = [];
+      this.screenStream.getTracks().forEach((track) => {
+        const sender = pc.addTrack(track, this.screenStream!);
+        this.screenSenders[id].push(sender);
+      });
+    }
+
+    return pc;
+  }
+
+  // ---------------- OFFER ----------------
+  private async createOffer(id: string, isRenegotiation = false) {
+    if (!this.shouldInitiate(id)) {
+      console.debug(
+        `[Offer] ${id} should initiate (${id} > ${this.myId}), skipping`,
+      );
+      return;
+    }
+
+    if (!isRenegotiation && this.initiators.has(id)) {
+      console.debug(
+        `[Offer] Already initiating with ${id}, skipping duplicate`,
+      );
+      return; // ← This was missing!
+    }
+
+    if (!isRenegotiation) {
+      this.initiators.add(id);
+    }
+    if (!this.peers[id]) {
+      this.peers[id] = this.createPeer(id);
+    }
+
+    const pc = this.peers[id];
 
     try {
-      const offer = await this.pubPC.createOffer();
-      await this.pubPC.setLocalDescription(offer);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
       this.send({
-        type: "PUB_OFFER",
+        type: "OFFER",
         payload: offer.sdp,
-        user_id: this.myId,
-        room_id: this.room.id,
+        sender: this.myId,
+        target: id,
       });
+
+      console.debug(`[Offer] Sent to ${id}`);
     } catch (err) {
-      console.error("[SFU Publisher Offer Error]", err);
+      console.error(`[Offer] Failed for ${id}:`, err);
     }
   }
 
-  // ---------------- MEDIA TOGGLES ----------------
-  toggleMic() {
-    const mediaState = this.state.localParticipant?.media;
-    if (!mediaState) return;
-
-    const nextEnabled = !mediaState.micEnabled;
-    this.localStream
-      ?.getAudioTracks()
-      .forEach((t) => (t.enabled = nextEnabled));
-
-    this.state.updateLocalParticipant({
-      id: this.myId,
-      name: this.participantName,
-      media: { ...mediaState, micEnabled: nextEnabled },
-    });
-
-    this.send({ type: "MEDIA_STATE", kind: "audio", enabled: nextEnabled });
+  private shouldInitiate(peerId: string): boolean {
+    // Lexicographic comparison: lower ID initiates
+    return this.myId < peerId;
   }
 
-  toggleCam() {
-    const mediaState = this.state.localParticipant?.media;
-    if (!mediaState) return;
+  // ---------------- ANSWER ----------------
+  private async handleOffer(sdp: string, id: string) {
+    if (!this.iceServers || this.iceServers.length === 0) {
+      console.warn("[Offer] Waiting for iceServers, queuing offer from", id);
+      this.pendingOffers[id] = sdp;
+      return;
+    }
 
-    const nextEnabled = !mediaState.camEnabled;
-    this.localStream
-      ?.getVideoTracks()
-      .forEach((t) => (t.enabled = nextEnabled));
+    if (!this.peers[id]) {
+      this.peers[id] = this.createPeer(id);
+    }
 
-    this.state.updateLocalParticipant({
-      id: this.myId,
-      name: this.participantName,
-      media: { ...mediaState, camEnabled: nextEnabled },
-    });
+    const pc = this.peers[id];
 
-    this.send({ type: "MEDIA_STATE", kind: "video", enabled: nextEnabled });
+    try {
+      // GLARE RECOVERY: Both peers sent OFFERs simultaneously
+      if (pc.signalingState === "have-local-offer") {
+        if (this.shouldInitiate(id)) {
+          // WE WIN: Keep our offer, reject theirs
+          console.warn(
+            `[Glare] Both sent OFFERs, we win (${this.myId} < ${id}), keeping our OFFER`,
+          );
+          await pc.setLocalDescription({
+            type: "rollback",
+          });
+        } else {
+          // THEY WIN: Roll back and accept their offer
+          console.warn(
+            `[Glare] Both sent OFFERs, they win (${id} < ${this.myId}), rolling back`,
+          );
+          pc.close();
+          delete this.peers[id];
+          this.initiators.delete(id);
+
+          // Create fresh peer connection to answer their offer
+          this.peers[id] = this.createPeer(id);
+        }
+      }
+
+      // Only set remote description if we're not already in negotiation
+      if (
+        this.peers[id].signalingState !== "stable" &&
+        this.peers[id].signalingState !== "have-local-offer"
+      ) {
+        console.warn(
+          `[Signaling] Cannot accept OFFER in state "${this.peers[id].signalingState}"`,
+        );
+        return;
+      }
+
+      await this.peers[id].setRemoteDescription({
+        type: "offer",
+        sdp,
+      });
+
+      const pending = this.pendingIceCandidates[id] || [];
+
+      for (const candidate of pending) {
+        try {
+          await this.peers[id].addIceCandidate(candidate);
+        } catch (err) {
+          console.warn("[ICE] Failed to add candidate:", err);
+        }
+      }
+
+      delete this.pendingIceCandidates[id];
+
+      const answer = await this.peers[id].createAnswer();
+
+      await this.peers[id].setLocalDescription(answer);
+      await this.flushIce(id, this.peers[id]);
+
+      this.send({
+        type: "ANSWER",
+        payload: answer.sdp,
+        sender: this.myId,
+        target: id,
+      });
+
+      console.debug(`[Answer] Sent to ${id}`);
+    } catch (err) {
+      console.error(`[Signaling] Failed to handle OFFER from ${id}:`, err);
+      this.emitError(
+        "OFFER_HANDLING_FAILED",
+        `Failed to handle offer from ${id}`,
+        err,
+        true,
+      );
+    }
+  }
+  // ---------------- CLEANUP ----------------
+  private closePeer(id: string) {
+    const pc = this.peers[id];
+
+    if (!pc) return;
+
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+
+    pc.close();
+
+    delete this.peers[id];
+
+    this.initiators.delete(id);
+
+    this.state.removeParticipant(id);
   }
 
-  // ---------------- SCREEN SHARING (SFU) ----------------
   async startScreenShare() {
     try {
       if (this.state.presenterId && this.state.presenterId !== this.myId) {
         throw new Error("Another user is already sharing their screen.");
       }
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        throw new Error("Screen sharing not supported on this device");
+      }
 
       this.screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
+        // audio: true,
       });
+
       this.isScreenSharing = true;
-
-      const screenTrack = this.screenStream.getVideoTracks()[0];
-
-      // Add Screen track directly to SFU Publisher PC
-      if (this.pubPC) {
-        this.screenSender = this.pubPC.addTrack(screenTrack, this.screenStream);
-        await this.createPublisherOffer();
-      }
 
       this.state.updateLocalParticipant({
         media: {
           isScreenSharing: true,
           screenStream: this.screenStream,
-          screenTrack,
+          screenTrack: this.screenStream.getVideoTracks()[0],
         },
       });
 
       this.state.setPresenterId(this.myId);
-
-      screenTrack.onended = () => {
+      // Handle the user clicking browser's built-in "Stop Sharing" button
+      this.screenStream.getVideoTracks()[0].onended = () => {
         this.stopScreenShare();
       };
+
+      Object.entries(this.peers).forEach(([peerId, pc]) => {
+        this.screenSenders[peerId] = [];
+        this.screenStream!.getTracks().forEach((track) => {
+          const sender = pc.addTrack(track, this.screenStream!);
+          this.screenSenders[peerId].push(sender);
+        });
+
+        // Renegotiate peer connection descriptors to notify remote side of new track footprint
+        this.createOffer(peerId, true);
+      });
 
       this.send({
         type: "SCREEN_SHARE_START",
@@ -610,10 +1014,11 @@ export class VideoSDKCore {
     } catch (err: any) {
       this.emitError(
         "SCREEN_SHARE_FAILED",
-        err?.message || "Failed screen share",
+        err?.message || "Failed to start screen sharing",
         err,
         true,
       );
+
       this.isScreenSharing = false;
       this.screenStream = null;
       throw err;
@@ -625,15 +1030,21 @@ export class VideoSDKCore {
 
     this.screenStream.getTracks().forEach((t) => t.stop());
 
-    if (this.pubPC && this.screenSender) {
-      try {
-        this.pubPC.removeTrack(this.screenSender);
-        this.createPublisherOffer();
-      } catch (e) {
-        console.warn("Failed removing screen sender", e);
-      }
-      this.screenSender = null;
-    }
+    // Remove tracks cleanly from WebRTC channel pathways across your peers
+    Object.entries(this.peers).forEach(([peerId, pc]) => {
+      const senders = this.screenSenders[peerId] || [];
+      senders.forEach((sender) => {
+        try {
+          pc.removeTrack(sender);
+        } catch (err) {
+          console.warn(err);
+        }
+      });
+      delete this.screenSenders[peerId];
+
+      // Renegotiate layout expectations to scale down stream bounds
+      this.createOffer(peerId, true);
+    });
 
     this.screenStream = null;
     this.isScreenSharing = false;
@@ -657,12 +1068,19 @@ export class VideoSDKCore {
     });
   }
 
-  // ---------------- CHAT & RECONNECT ----------------
   sendChatMessage(payload: ChatInput) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.room.id)
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn("WS not connected");
       return;
+    }
+
+    if (!this.room.id) {
+      console.warn("No roomId set");
+      return;
+    }
 
     const isPrivate = !!payload?.target;
+
     const senderName = this.state.localParticipant?.name || "Anonymous";
 
     const msg: ChatMessage = {
@@ -675,8 +1093,10 @@ export class VideoSDKCore {
       target: payload.target ?? null,
     };
 
+    // optimistic UI update
     this.state.addChatMessage(msg);
 
+    // send protocol payload (clean + consistent)
     this.send({
       type: "CHAT_MESSAGE",
       message: payload.message.trim(),
@@ -685,47 +1105,9 @@ export class VideoSDKCore {
       room_id: this.room.id,
       target: isPrivate ? (payload.target ?? null) : null,
       reply_to: payload.reply_to ?? null,
+
       client_ts: Date.now(),
     });
-  }
-
-  private scheduleReconnect() {
-    if (!this.room.id) return;
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-    window.clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = window.setTimeout(async () => {
-      try {
-        await this.connect(this.room.id!, this.participantName);
-        this.reconnectAttempts = 0;
-      } catch {
-        this.reconnectAttempts++;
-        this.scheduleReconnect();
-      }
-    }, delay);
-  }
-
-  private startHeartbeat() {
-    this.stopHeartbeat();
-    this.pingInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.send({ type: "PING", client_ts: Date.now() });
-      }
-    }, 20000);
-  }
-
-  private stopHeartbeat() {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-  }
-
-  private reset() {
-    this.pubPC?.close();
-    this.subPC?.close();
-    this.pubPC = null;
-    this.subPC = null;
-    this.state.resetRemoteState();
   }
 
   disconnect() {
@@ -733,10 +1115,9 @@ export class VideoSDKCore {
 
     this.stopScreenShare();
 
-    this.pubPC?.close();
-    this.subPC?.close();
-    this.pubPC = null;
-    this.subPC = null;
+    Object.values(this.peers).forEach((pc) => pc.close());
+    this.peers = {};
+    this.initiators.clear();
 
     this.stopHeartbeat();
 
@@ -748,6 +1129,7 @@ export class VideoSDKCore {
         sender_name: this.state.localParticipant?.name,
       });
 
+      // Allow the LEAVE frame to be flushed.
       setTimeout(() => {
         this.ws?.close(1000, "Leaving meeting");
         this.ws = null;
@@ -760,43 +1142,60 @@ export class VideoSDKCore {
     }
 
     this.room.id = null;
+
     this.state.localParticipant = null;
     this.state.notify("localParticipant");
+
     this.state.participants.clear();
     this.state.notify("participants");
+
     this.events.onMeetingLeft?.();
+
     this.state.clearChat();
     this.state.setPresenterId(null);
   }
 
-  private async restartPublisherIce() {
-    if (!this.pubPC) return;
+  private async restartPeerIce(id: string) {
+    const pc = this.peers[id];
+
+    if (!pc) return;
+
     try {
-      this.pubPC.restartIce();
-      await this.createPublisherOffer();
+      pc.restartIce();
+
+      const offer = await pc.createOffer({
+        iceRestart: true,
+      });
+
+      await pc.setLocalDescription(offer);
+
+      this.send({
+        type: "OFFER",
+        payload: offer.sdp,
+        sender: this.myId,
+        target: id,
+        iceRestart: true,
+      });
+
+      console.log(`[ICE RESTART] offer sent to ${id}`);
     } catch (err) {
-      console.error("[Publisher ICE Restart Failed]", err);
+      console.error(`[ICE RESTART FAILED] ${id}`, err);
     }
   }
 
-  private emitError(
-    code: string,
-    message: string,
-    raw?: any,
-    recoverable = true,
-  ) {
-    const err: SDKError = {
-      code,
-      message,
-      raw,
-      roomId: this.room.id,
-      userId: this.myId,
-      recoverable,
-    };
-    this.events.onError?.(err);
-    this.joinRejecter?.(err);
-    this.joinRejecter = undefined;
-    console.error("[MeetingSDK Error]", err);
+  private async flushIce(id: string, pc: RTCPeerConnection) {
+    const pending = this.pendingIceCandidates[id];
+    if (!pending?.length) return;
+
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn("ICE flush error", e);
+      }
+    }
+
+    delete this.pendingIceCandidates[id];
   }
 
   private send(msg: any) {
@@ -804,14 +1203,16 @@ export class VideoSDKCore {
   }
 
   approveJoinRequest(requestId: string) {
-    this.send({ type: "JOIN_APPROVE", request_id: requestId });
+    this.send({
+      type: "JOIN_APPROVE",
+      request_id: requestId,
+    });
   }
 
   rejectJoinRequest(requestId: string) {
-    this.send({ type: "JOIN_REJECT", request_id: requestId });
-  }
-
-  getMeeting(): { id: string | null; name: string | null } {
-    return this.room;
+    this.send({
+      type: "JOIN_REJECT",
+      request_id: requestId,
+    });
   }
 }

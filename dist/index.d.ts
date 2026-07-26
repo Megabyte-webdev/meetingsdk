@@ -16,7 +16,6 @@ type Events = {
     } | string, decision?: EntryDecision) => void;
     onJoinApproved?: (requestId: string) => void;
     onJoinRejected?: (requestId: string) => void;
-    onRoomUpdate?: (data: any) => void;
     onUserLeft?: (id: string) => void;
     onMeetingLeft?: () => void;
     onChatMessage?: (msg: ChatMessage) => void;
@@ -125,18 +124,20 @@ declare class VideoSDKCore {
     private events;
     private url;
     private ws;
-    private pubPC;
-    private subPC;
-    private iceServers;
+    private peers;
+    private initiators;
     private lastPong;
+    private iceServers;
     private intentionalDisconnect;
     private myId;
     private room;
     private localStream;
     private screenStream;
-    private screenSender;
     private isScreenSharing;
+    private screenSenders;
     private pingInterval;
+    private pendingIceCandidates;
+    private pendingOffers;
     private reconnectAttempts;
     private reconnectTimer?;
     private participantName;
@@ -146,33 +147,36 @@ declare class VideoSDKCore {
     private isWaitingForApproval;
     private pendingRequestId;
     private iceTransportPolicy;
+    private emitError;
     constructor(events?: Events, url?: string);
     initLocal(video: HTMLVideoElement, name: string): Promise<void>;
-    joinMeeting(config: MeetingConfig): Promise<void>;
-    private setupPublisherPC;
-    private setupSubscriberPC;
     connect(roomId: string, name: string): Promise<void>;
-    private handle;
-    private createPublisherOffer;
-    toggleMic(): void;
-    toggleCam(): void;
-    startScreenShare(): Promise<MediaStream>;
-    stopScreenShare(): void;
-    sendChatMessage(payload: ChatInput): void;
-    private scheduleReconnect;
-    private startHeartbeat;
-    private stopHeartbeat;
-    private reset;
-    disconnect(): void;
-    private restartPublisherIce;
-    private emitError;
-    private send;
-    approveJoinRequest(requestId: string): void;
-    rejectJoinRequest(requestId: string): void;
+    joinMeeting(config: MeetingConfig): Promise<void>;
     getMeeting(): {
         id: string | null;
         name: string | null;
     };
+    toggleMic(): void;
+    toggleCam(): void;
+    private scheduleReconnect;
+    private startHeartbeat;
+    private stopHeartbeat;
+    private reset;
+    private handleJoinApproved;
+    private handle;
+    private createPeer;
+    private createOffer;
+    private shouldInitiate;
+    private handleOffer;
+    private closePeer;
+    startScreenShare(): Promise<MediaStream>;
+    stopScreenShare(): void;
+    sendChatMessage(payload: ChatInput): void;
+    disconnect(): void;
+    private flushIce;
+    private send;
+    approveJoinRequest(requestId: string): void;
+    rejectJoinRequest(requestId: string): void;
 }
 
 type PubSubHandle = {
@@ -252,27 +256,4 @@ declare const useRemoteMedia: (participantId: string) => {
     isMicEnabled: boolean;
 };
 
-type LiveRoomState = {
-    active: boolean;
-    count: number;
-    canJoin: boolean;
-    approved: boolean;
-    isHost: boolean;
-    hasMoreParticipants: boolean;
-    participants: {
-        id: string;
-        name: string;
-        isHost: boolean;
-        isPresenter: boolean;
-        micEnabled: boolean;
-        camEnabled: boolean;
-    }[];
-};
-declare function useMeetingPreview(roomId: string, userId: string): {
-    room: LiveRoomState | null;
-    isConnected: boolean;
-    isLoading: boolean;
-    error: string | null;
-};
-
-export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalParticipant, useMeeting, useMeetingContext, useMeetingPreview, useParticipants, useRemoteMedia };
+export { type ChatInput, MeetingProvider, MeetingState, type Participant, VideoSDKCore, useLocalParticipant, useMeeting, useMeetingContext, useParticipants, useRemoteMedia };
