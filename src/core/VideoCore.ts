@@ -514,28 +514,19 @@ export class VideoSDKCore {
       }
 
       case "SUB_OFFER": {
-        if (!this.subPC) {
-          console.warn("Subscriber PC not ready");
-          return;
-        }
+        if (this.subPC) {
+          await this.subPC.setRemoteDescription({
+            type: "offer",
+            sdp: msg.payload,
+          });
+          const answer = await this.subPC.createAnswer();
+          await this.subPC.setLocalDescription(answer);
 
-        const descriptor: TrackDescriptor = msg.track;
-        const mid = descriptor.mid;
-
-        console.log(
-          "[Signaling] Received SUB_OFFER with descriptor:",
-          descriptor,
-        );
-
-        if (mid) {
-          this.pendingTracks.set(mid, descriptor);
-          console.log("[Signaling] Stored pending track for MID:", mid);
-        }
-
-        if (this.subscriberNegotiating) {
-          console.warn("Subscriber negotiating, queueing offer");
-          this.subscriberOfferQueue.push(msg);
-          return;
+          this.send({
+            type: "SUB_ANSWER",
+            payload: answer.sdp,
+            user_id: this.myId,
+          });
         }
 
         await this.handleSubscriberOffer(msg);
