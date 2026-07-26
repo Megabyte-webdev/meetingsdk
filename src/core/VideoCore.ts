@@ -129,7 +129,7 @@ export class VideoSDKCore {
     }
   }
 
-  // ---------------- MEDIA SETUP ----------------
+  //  MEDIA SETUP
   async initLocal(video: HTMLVideoElement, name: string) {
     this.participantName = name;
     try {
@@ -231,7 +231,7 @@ export class VideoSDKCore {
     this.state.localStream = this.localStream;
     await this.connect(roomId, name);
   }
-  // ---------------- SFU PEER CONNECTION CREATION ----------------
+  //  SFU PEER CONNECTION CREATION
   private setupPublisherPC() {
     if (!this.localStream) return;
 
@@ -401,7 +401,7 @@ export class VideoSDKCore {
     };
   }
 
-  // ---------------- WEBSOCKET CONNECTION & SIGNALING ----------------
+  //  WEBSOCKET CONNECTION & SIGNALING
   async connect(roomId: string, name: string) {
     this.room.id = roomId;
     this.reset();
@@ -514,22 +514,24 @@ export class VideoSDKCore {
       }
 
       case "SUB_OFFER": {
-        if (this.subPC) {
-          await this.subPC.setRemoteDescription({
-            type: "offer",
-            sdp: msg.payload,
-          });
-          const answer = await this.subPC.createAnswer();
-          await this.subPC.setLocalDescription(answer);
+        if (!this.subPC) break;
 
-          this.send({
-            type: "SUB_ANSWER",
-            payload: answer.sdp,
-            user_id: this.myId,
-          });
+        // ✅ FIX 1: Store track descriptors BEFORE negotiation
+        if (msg.track) {
+          console.log(
+            "[SUB_OFFER] Storing track descriptor for MID:",
+            msg.track.mid,
+            msg.track,
+          );
+          this.pendingTracks.set(msg.track.mid, msg.track);
         }
 
-        await this.handleSubscriberOffer(msg);
+        if (this.subscriberNegotiating) {
+          console.log("[SUB_OFFER] Subscriber negotiating, queueing offer");
+          this.subscriberOfferQueue.push(msg);
+        } else {
+          await this.handleSubscriberOffer(msg);
+        }
         break;
       }
 
@@ -703,13 +705,13 @@ export class VideoSDKCore {
     try {
       this.subscriberNegotiating = true;
 
+      // handle the negotiation, descriptors already stored
       await this.subPC.setRemoteDescription({
         type: "offer",
         sdp: msg.payload,
       });
 
       const answer = await this.subPC.createAnswer();
-
       await this.subPC.setLocalDescription(answer);
 
       this.send({
@@ -717,19 +719,23 @@ export class VideoSDKCore {
         payload: answer.sdp,
         user_id: this.myId,
       });
+
+      console.log("[SUB_ANSWER] Sent successfully");
     } catch (err) {
-      console.error("[SUB OFFER ERROR]", err);
+      console.error("[SUB_OFFER_ERROR]", err);
     } finally {
       this.subscriberNegotiating = false;
 
+      // Process next queued offer if any
       const next = this.subscriberOfferQueue.shift();
-
       if (next) {
+        console.log("[SUB_OFFER] Processing queued offer");
         await this.handleSubscriberOffer(next);
       }
     }
   }
-  // ---------------- PUBLISHER RENEGOTIATION ----------------
+
+  //  PUBLISHER RENEGOTIATION
   private async createPublisherOffer() {
     if (!this.pubPC) return;
 
@@ -748,7 +754,7 @@ export class VideoSDKCore {
     }
   }
 
-  // ---------------- MEDIA TOGGLES ----------------
+  //  MEDIA TOGGLES
   toggleMic() {
     const mediaState = this.state.localParticipant?.media;
     if (!mediaState) return;
@@ -785,7 +791,7 @@ export class VideoSDKCore {
     this.send({ type: "MEDIA_STATE", kind: "video", enabled: nextEnabled });
   }
 
-  // ---------------- SCREEN SHARING (SFU) ----------------
+  //  SCREEN SHARING (SFU)
   async startScreenShare() {
     try {
       if (this.state.presenterId && this.state.presenterId !== this.myId) {
@@ -874,7 +880,7 @@ export class VideoSDKCore {
     });
   }
 
-  // ---------------- CHAT & RECONNECT ----------------
+  //  CHAT & RECONNECT
   sendChatMessage(payload: ChatInput) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.room.id)
       return;
