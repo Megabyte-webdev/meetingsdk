@@ -6,6 +6,7 @@ import {
   MeetingConfig,
   Participant,
   SDKError,
+  TrackDescriptor,
 } from "../types/meeting";
 import { MeetingState } from "./MeetingState";
 
@@ -113,8 +114,10 @@ export class VideoSDKCore {
         name: this.participantName,
         media: {
           stream: this.localStream,
-          micEnabled: true,
-          camEnabled: true,
+          cameraTrack,
+          audioTrack,
+          micEnabled,
+          camEnabled,
           isScreenSharing: false,
         },
       });
@@ -196,10 +199,22 @@ export class VideoSDKCore {
 
     // Reuse existing stream if initLocal already configured it
     if (!this.localStream) {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+      const acquired = await this.acquireLocalMedia({
+        videoConstraints: !videoMuted,
+        audioConstraints: !audioMuted,
       });
+
+      this.localStream = acquired.stream;
+      console.log(
+        "[LOCAL MEDIA]",
+        this.localStream.getTracks().map((t) => ({
+          kind: t.kind,
+          enabled: t.enabled,
+          ready: t.readyState,
+        })),
+      );
+      camEnabled = acquired.camEnabled && !videoMuted;
+      micEnabled = acquired.micEnabled && !audioMuted;
     }
 
     this.localStream.getAudioTracks().forEach((t) => {
@@ -214,8 +229,10 @@ export class VideoSDKCore {
       name: this.participantName,
       media: {
         stream: this.localStream,
-        micEnabled: !audioMuted,
-        camEnabled: !videoMuted,
+        cameraTrack,
+        audioTrack,
+        micEnabled,
+        camEnabled,
         isScreenSharing: false,
       },
     });
@@ -1006,7 +1023,6 @@ export class VideoSDKCore {
         type: "SCREEN_SHARE_START",
         sender: this.myId,
         room_id: this.room.id,
-        camera_id: this.localStream?.id.replace(/[{}]/g, ""),
         stream_id: this.screenStream.id.replace(/[{}]/g, ""),
       });
 
@@ -1025,7 +1041,7 @@ export class VideoSDKCore {
     }
   }
 
-  stopScreenShare() {
+  async stopScreenShare() {
     if (!this.screenStream) return;
 
     this.screenStream.getTracks().forEach((t) => t.stop());
