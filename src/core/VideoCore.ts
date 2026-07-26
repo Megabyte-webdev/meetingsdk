@@ -43,7 +43,7 @@ export class VideoSDKCore {
   private joinRejecter?: (e: any) => void;
   private isWaitingForApproval = false;
   private pendingRequestId: string | null = null;
-  private iceTransportPolicy: RTCIceTransportPolicy = "all";
+  private iceTransportPolicy: RTCIceTransportPolicy = "relay";
 
   constructor(
     private events: Events = {},
