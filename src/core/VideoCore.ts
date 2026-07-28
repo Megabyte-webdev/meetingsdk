@@ -738,6 +738,13 @@ export class VideoSDKCore {
   //  PUBLISHER RENEGOTIATION
   private async createPublisherOffer() {
     if (!this.pubPC) return;
+    if (this.pubPC.signalingState !== "stable") {
+      console.warn(
+        "[Publisher] Signaling state is not stable, skipping/deferring offer creation:",
+        this.pubPC.signalingState,
+      );
+      return;
+    }
 
     try {
       const offer = await this.pubPC.createOffer();
@@ -948,6 +955,9 @@ export class VideoSDKCore {
     this.subPC?.close();
     this.pubPC = null;
     this.subPC = null;
+    this.pendingTracks.clear();
+    this.subscriberOfferQueue = [];
+    this.subscriberNegotiating = false;
     this.state.resetRemoteState();
   }
 
