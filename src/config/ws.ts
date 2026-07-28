@@ -1,4 +1,4 @@
 export const SDK_CONFIG = {
-  wsUrl: "wss://sfuserver-production.up.railway.app/ws",
-  baseUrl: "https://sfuserver-production.up.railway.app",
+  wsUrl: "wss:/sfu-server.duckdns.org/ws",
+  baseUrl: "https://sfu-server.duckdns.org",
 };
