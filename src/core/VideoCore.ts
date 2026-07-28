@@ -18,6 +18,7 @@ export class VideoSDKCore {
 
   private publisherNegotiating = false;
   private publisherOfferQueue: boolean[] = [];
+  private publisherOfferTimeout: any = null;
 
   private subscriberNegotiating = false;
   private subscriberOfferQueue: any[] = [];
@@ -47,6 +48,9 @@ export class VideoSDKCore {
   private isWaitingForApproval = false;
   private pendingRequestId: string | null = null;
   private iceTransportPolicy: RTCIceTransportPolicy = "all";
+
+  private iceRestartAttempts = new Map<string, number>();
+  private maxIceRestartAttempts = 3;
 
   constructor(
     private events: Events = {},
@@ -241,6 +245,14 @@ export class VideoSDKCore {
 
     this.pubPC.onicecandidate = (e) => {
       if (e.candidate) {
+        if (!e.candidate.sdpMid) {
+          console.debug(
+            "[Publisher] Skipping ICE candidate with no sdpMid",
+            e.candidate.candidate,
+          );
+          return;
+        }
+
         this.send({
           type: "PUB_ICE",
           payload: JSON.stringify(e.candidate),
@@ -250,10 +262,22 @@ export class VideoSDKCore {
     };
 
     this.pubPC.onconnectionstatechange = () => {
+      console.log(
+        "[Publisher] Connection state changed:",
+        this.pubPC?.connectionState,
+      );
+
       if (this.pubPC?.connectionState === "failed") {
-        console.warn("[Publisher] Connection failed, restarting ICE");
+        console.warn("[Publisher] Connection failed, attempting ICE restart");
         this.restartPublisherIce();
       }
+    };
+
+    this.pubPC.oniceconnectionstatechange = () => {
+      console.log(
+        "[Publisher] ICE connection state changed:",
+        this.pubPC?.iceConnectionState,
+      );
     };
   }
 
@@ -265,6 +289,15 @@ export class VideoSDKCore {
 
     this.subPC.onicecandidate = (e) => {
       if (e.candidate) {
+        //  Skip candidates with empty sdpMid
+        if (!e.candidate.sdpMid) {
+          console.debug(
+            "[Subscriber] Skipping ICE candidate with no sdpMid",
+            e.candidate.candidate,
+          );
+          return;
+        }
+
         this.send({
           type: "SUB_ICE",
           payload: JSON.stringify(e.candidate),
@@ -279,8 +312,12 @@ export class VideoSDKCore {
 
       if (!mid) return;
 
+      //  Only set if doesn't exist (prevent overwrite)
       const descriptor = this.pendingTracks.get(mid);
-      if (!descriptor) return;
+      if (!descriptor) {
+        console.warn("[Subscriber] No pending track descriptor for mid:", mid);
+        return;
+      }
 
       this.pendingTracks.delete(mid);
 
@@ -308,9 +345,22 @@ export class VideoSDKCore {
     };
 
     this.subPC.onconnectionstatechange = () => {
+      console.log(
+        "[Subscriber] Connection state changed:",
+        this.subPC?.connectionState,
+      );
+
       if (this.subPC?.connectionState === "failed") {
-        console.warn("Subscriber connection failed");
+        console.warn("[Subscriber] Connection failed, attempting ICE restart");
+        this.restartSubscriberIce();
       }
+    };
+
+    this.subPC.oniceconnectionstatechange = () => {
+      console.log(
+        "[Subscriber] ICE connection state changed:",
+        this.subPC?.iceConnectionState,
+      );
     };
   }
 
@@ -415,6 +465,12 @@ export class VideoSDKCore {
 
       case "PUB_ANSWER": {
         if (this.pubPC) {
+          //  Clear timeout when answer arrives
+          if (this.publisherOfferTimeout) {
+            clearTimeout(this.publisherOfferTimeout);
+            this.publisherOfferTimeout = null;
+          }
+
           await this.pubPC.setRemoteDescription({
             type: "answer",
             sdp: msg.payload,
@@ -433,8 +489,16 @@ export class VideoSDKCore {
       case "SUB_OFFER": {
         if (!this.subPC) break;
 
+        //  Only set if doesn't already exist
         if (msg.track) {
-          this.pendingTracks.set(msg.track.mid, msg.track);
+          if (!this.pendingTracks.has(msg.track.mid)) {
+            this.pendingTracks.set(msg.track.mid, msg.track);
+          } else {
+            console.debug(
+              "[SUB_OFFER] Track descriptor already exists for mid:",
+              msg.track.mid,
+            );
+          }
         }
 
         if (this.subscriberNegotiating) {
@@ -449,7 +513,9 @@ export class VideoSDKCore {
         if (this.pubPC && msg.payload) {
           await this.pubPC
             .addIceCandidate(JSON.parse(msg.payload))
-            .catch(console.warn);
+            .catch((err) =>
+              console.warn("[Publisher] Failed to add ICE candidate:", err),
+            );
         }
         break;
       }
@@ -458,7 +524,9 @@ export class VideoSDKCore {
         if (this.subPC && msg.payload) {
           await this.subPC
             .addIceCandidate(JSON.parse(msg.payload))
-            .catch(console.warn);
+            .catch((err) =>
+              console.warn("[Subscriber] Failed to add ICE candidate:", err),
+            );
         }
         break;
       }
@@ -646,6 +714,7 @@ export class VideoSDKCore {
     }
   }
 
+  //  Add timeout for publisher offer
   private async createPublisherOffer() {
     if (!this.pubPC) return;
 
@@ -665,6 +734,22 @@ export class VideoSDKCore {
         user_id: this.myId,
         room_id: this.room.id,
       });
+
+      // ✅ NEW: Set timeout for answer
+      this.publisherOfferTimeout = setTimeout(() => {
+        if (this.publisherNegotiating) {
+          console.warn(
+            "[Publisher] PUB_ANSWER timeout (5s), resetting negotiation",
+          );
+          this.publisherNegotiating = false;
+
+          // Retry if there are queued offers
+          if (this.publisherOfferQueue.length > 0) {
+            this.publisherOfferQueue.shift();
+            this.createPublisherOffer();
+          }
+        }
+      }, 5000); // 5 second timeout
     } catch (err) {
       this.publisherNegotiating = false;
       console.error("[SFU Publisher Offer Error]", err);
@@ -864,6 +949,13 @@ export class VideoSDKCore {
 
   private reset() {
     window.clearTimeout(this.reconnectTimer);
+
+    //  Clear offer timeout
+    if (this.publisherOfferTimeout) {
+      clearTimeout(this.publisherOfferTimeout);
+      this.publisherOfferTimeout = null;
+    }
+
     this.pubPC?.close();
     this.subPC?.close();
     this.pubPC = null;
@@ -873,12 +965,19 @@ export class VideoSDKCore {
     this.subscriberNegotiating = false;
     this.publisherOfferQueue = [];
     this.publisherNegotiating = false;
+    this.iceRestartAttempts.clear();
     this.state.resetRemoteState();
   }
 
   disconnect() {
     this.intentionalDisconnect = true;
     window.clearTimeout(this.reconnectTimer);
+
+    //  Clear offer timeout
+    if (this.publisherOfferTimeout) {
+      clearTimeout(this.publisherOfferTimeout);
+      this.publisherOfferTimeout = null;
+    }
 
     this.stopScreenShare();
 
@@ -918,13 +1017,55 @@ export class VideoSDKCore {
     this.state.setPresenterId(null);
   }
 
+  // ✅ NEW: Improved publisher ICE restart with timeout and retry limit
   private async restartPublisherIce() {
     if (!this.pubPC) return;
+
+    const key = "pub_ice_restart";
+    const attempts = this.iceRestartAttempts.get(key) || 0;
+
+    if (attempts >= this.maxIceRestartAttempts) {
+      console.error("[Publisher] Max ICE restart attempts reached, giving up");
+      this.iceRestartAttempts.delete(key);
+      return;
+    }
+
     try {
+      console.log(
+        `[Publisher] Restarting ICE (attempt ${attempts + 1}/${this.maxIceRestartAttempts})`,
+      );
+      this.iceRestartAttempts.set(key, attempts + 1);
+
       this.pubPC.restartIce();
       await this.createPublisherOffer();
     } catch (err) {
-      console.error("[Publisher ICE Restart Failed]", err);
+      console.error("[Publisher] ICE restart failed:", err);
+    }
+  }
+
+  // ✅ NEW: Subscriber ICE restart (was missing)
+  private async restartSubscriberIce() {
+    if (!this.subPC) return;
+
+    const key = "sub_ice_restart";
+    const attempts = this.iceRestartAttempts.get(key) || 0;
+
+    if (attempts >= this.maxIceRestartAttempts) {
+      console.error("[Subscriber] Max ICE restart attempts reached, giving up");
+      this.iceRestartAttempts.delete(key);
+      return;
+    }
+
+    try {
+      console.log(
+        `[Subscriber] Restarting ICE (attempt ${attempts + 1}/${this.maxIceRestartAttempts})`,
+      );
+      this.iceRestartAttempts.set(key, attempts + 1);
+
+      this.subPC.restartIce();
+      // Subscriber doesn't need to create offer - server will send new offer
+    } catch (err) {
+      console.error("[Subscriber] ICE restart failed:", err);
     }
   }
 
