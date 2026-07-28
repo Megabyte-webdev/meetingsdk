@@ -16,6 +16,9 @@ export class VideoSDKCore {
   private subPC: RTCPeerConnection | null = null;
   private pendingTracks = new Map<string, TrackDescriptor>();
 
+  private publisherNegotiating = false;
+  private publisherOfferQueue: boolean[] = [];
+
   private subscriberNegotiating = false;
   private subscriberOfferQueue: any[] = [];
 
@@ -66,7 +69,6 @@ export class VideoSDKCore {
   }> {
     const { videoConstraints = true, audioConstraints = true } = options;
 
-    // 1. Primary Attempt: Both Video and Audio
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraints,
@@ -87,7 +89,6 @@ export class VideoSDKCore {
         err?.name || err?.message,
       );
 
-      // Check if camera is locked by another process (Chrome/Edge/Discord/etc.)
       const isDeviceLocked =
         err?.name === "NotReadableError" ||
         err?.name === "TrackStartError" ||
@@ -99,7 +100,6 @@ export class VideoSDKCore {
           "[VideoSDKCore] Camera is locked by another browser/app. Falling back to Audio-Only.",
         );
 
-        // 2. Fallback: Audio Only
         try {
           const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
             video: false,
@@ -115,12 +115,11 @@ export class VideoSDKCore {
           };
         } catch (audioErr: any) {
           console.warn(
-            "[VideoSDKCore] Audio acquisition also failed. Falling back to View-Only stream.",
+            "[VideoSDKCore] Audio acquisition failed. Falling back to View-Only stream.",
           );
         }
       }
 
-      // 3. Last Resort Fallback: View-Only (empty stream) to allow room join
       return {
         stream: new MediaStream(),
         camEnabled: false,
@@ -129,7 +128,6 @@ export class VideoSDKCore {
     }
   }
 
-  //  MEDIA SETUP
   async initLocal(video: HTMLVideoElement, name: string) {
     this.participantName = name;
     try {
@@ -143,14 +141,6 @@ export class VideoSDKCore {
       });
 
       this.localStream = stream;
-      console.log(
-        "[LOCAL MEDIA]",
-        this.localStream.getTracks().map((t) => ({
-          kind: t.kind,
-          enabled: t.enabled,
-          ready: t.readyState,
-        })),
-      );
 
       if (video && this.localStream.getVideoTracks().length > 0) {
         video.srcObject = this.localStream;
@@ -196,19 +186,10 @@ export class VideoSDKCore {
       });
 
       this.localStream = acquired.stream;
-      console.log(
-        "[LOCAL MEDIA]",
-        this.localStream.getTracks().map((t) => ({
-          kind: t.kind,
-          enabled: t.enabled,
-          ready: t.readyState,
-        })),
-      );
       camEnabled = acquired.camEnabled && !videoMuted;
       micEnabled = acquired.micEnabled && !audioMuted;
     }
 
-    // Apply track state safely without throws
     this.localStream.getAudioTracks().forEach((t) => (t.enabled = micEnabled));
     this.localStream.getVideoTracks().forEach((t) => (t.enabled = camEnabled));
 
@@ -231,7 +212,7 @@ export class VideoSDKCore {
     this.state.localStream = this.localStream;
     await this.connect(roomId, name);
   }
-  //  SFU PEER CONNECTION CREATION
+
   private setupPublisherPC() {
     if (!this.localStream) return;
 
@@ -240,50 +221,24 @@ export class VideoSDKCore {
       iceTransportPolicy: this.iceTransportPolicy,
     });
 
-    // ✅ FIX: Add ALL tracks INCLUDING muted ones
-    // Map to track all track types we need to include
-    const tracksByKind = new Map<string, MediaStreamTrack>();
-
-    this.localStream.getTracks().forEach((track) => {
-      tracksByKind.set(track.kind, track);
-    });
-
-    // Ensure we have both audio and video tracks even if disabled
-    // Audio is usually present
     const audioTrack = this.localStream.getAudioTracks()[0];
     if (audioTrack) {
-      console.log("[Publisher] Adding audio track:", {
-        kind: audioTrack.kind,
-        id: audioTrack.id,
-        enabled: audioTrack.enabled,
-        state: audioTrack.readyState,
-      });
-
       try {
-        this.pubPC?.addTrack(audioTrack, this.localStream!);
+        this.pubPC.addTrack(audioTrack, this.localStream);
       } catch (e) {
         console.error("[Publisher] Failed to add audio track:", e);
       }
     }
 
-    // Video might be muted initially - still add it!
     const videoTrack = this.localStream.getVideoTracks()[0];
     if (videoTrack) {
-      console.log("[Publisher] Adding video track:", {
-        kind: videoTrack.kind,
-        id: videoTrack.id,
-        enabled: videoTrack.enabled, // Can be false, that's OK
-        state: videoTrack.readyState,
-      });
-
       try {
-        this.pubPC?.addTrack(videoTrack, this.localStream!);
+        this.pubPC.addTrack(videoTrack, this.localStream);
       } catch (e) {
         console.error("[Publisher] Failed to add video track:", e);
       }
     }
 
-    // Rest of setup...
     this.pubPC.onicecandidate = (e) => {
       if (e.candidate) {
         this.send({
@@ -295,12 +250,6 @@ export class VideoSDKCore {
     };
 
     this.pubPC.onconnectionstatechange = () => {
-      console.log("[Publisher PC State]", {
-        connection: this.pubPC?.connectionState,
-        ice: this.pubPC?.iceConnectionState,
-        signaling: this.pubPC?.signalingState,
-      });
-
       if (this.pubPC?.connectionState === "failed") {
         console.warn("[Publisher] Connection failed, restarting ICE");
         this.restartPublisherIce();
@@ -325,64 +274,30 @@ export class VideoSDKCore {
     };
 
     this.subPC.ontrack = (event) => {
-      console.log("[SFU ontrack Event]", {
-        kind: event.track.kind,
-        id: event.track.id,
-        mid: event.transceiver.mid,
-        streams: event.streams.length,
-      });
-
       const stream = event.streams[0] || new MediaStream([event.track]);
       const mid = event.transceiver.mid;
 
-      if (!mid) {
-        console.warn("[Subscriber] Track received without MID", event.track);
-        return;
-      }
-
-      console.log("[Subscriber] Looking for descriptor with MID:", mid, {
-        available: [...this.pendingTracks.keys()],
-      });
+      if (!mid) return;
 
       const descriptor = this.pendingTracks.get(mid);
+      if (!descriptor) return;
 
-      if (!descriptor) {
-        console.warn("[Subscriber] No descriptor found for MID:", mid);
-        console.log("[Subscriber] Pending tracks:", [
-          ...this.pendingTracks.entries(),
-        ]);
-        return;
-      }
-
-      console.log("[Subscriber] Found descriptor:", descriptor);
       this.pendingTracks.delete(mid);
 
       switch (descriptor.source) {
         case "camera":
-          console.log(
-            "[Subscriber] Updating camera for:",
-            descriptor.publisher_id,
-          );
           this.state.updateParticipantMedia(descriptor.publisher_id, {
             stream,
             cameraTrack: event.track,
           });
           break;
         case "audio":
-          console.log(
-            "[Subscriber] Updating audio for:",
-            descriptor.publisher_id,
-          );
           this.state.updateParticipantMedia(descriptor.publisher_id, {
             stream,
             audioTrack: event.track,
           });
           break;
         case "screen":
-          console.log(
-            "[Subscriber] Updating screen for:",
-            descriptor.publisher_id,
-          );
           this.state.updateParticipantMedia(descriptor.publisher_id, {
             screenStream: stream,
             screenTrack: event.track,
@@ -393,15 +308,12 @@ export class VideoSDKCore {
     };
 
     this.subPC.onconnectionstatechange = () => {
-      console.log("[SFU Subscriber PC State]", this.subPC?.connectionState);
-
       if (this.subPC?.connectionState === "failed") {
         console.warn("Subscriber connection failed");
       }
     };
   }
 
-  //  WEBSOCKET CONNECTION & SIGNALING
   async connect(roomId: string, name: string) {
     this.room.id = roomId;
     this.reset();
@@ -412,7 +324,6 @@ export class VideoSDKCore {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
-        console.log("WebSocket connected to SFU, sending JOIN...");
         const micEnabled = !!this.state.localParticipant?.media?.micEnabled;
         const camEnabled = !!this.state.localParticipant?.media?.camEnabled;
 
@@ -481,7 +392,6 @@ export class VideoSDKCore {
         await this.createPublisherOffer();
 
         const media = this.state.localParticipant?.media;
-
         if (media) {
           this.send({
             type: "MEDIA_STATE",
@@ -509,6 +419,13 @@ export class VideoSDKCore {
             type: "answer",
             sdp: msg.payload,
           });
+          this.publisherNegotiating = false;
+
+          // Drain offer queue
+          if (this.publisherOfferQueue.length > 0) {
+            this.publisherOfferQueue.shift();
+            await this.createPublisherOffer();
+          }
         }
         break;
       }
@@ -516,18 +433,11 @@ export class VideoSDKCore {
       case "SUB_OFFER": {
         if (!this.subPC) break;
 
-        // ✅ FIX 1: Store track descriptors BEFORE negotiation
         if (msg.track) {
-          console.log(
-            "[SUB_OFFER] Storing track descriptor for MID:",
-            msg.track.mid,
-            msg.track,
-          );
           this.pendingTracks.set(msg.track.mid, msg.track);
         }
 
         if (this.subscriberNegotiating) {
-          console.log("[SUB_OFFER] Subscriber negotiating, queueing offer");
           this.subscriberOfferQueue.push(msg);
         } else {
           await this.handleSubscriberOffer(msg);
@@ -591,6 +501,12 @@ export class VideoSDKCore {
 
       case "USER_LEFT": {
         const peerId = msg.participant.id;
+        // Clean up any un-handled pending tracks from this user
+        for (const [mid, descriptor] of this.pendingTracks.entries()) {
+          if (descriptor.publisher_id === peerId) {
+            this.pendingTracks.delete(mid);
+          }
+        }
         this.state.removeParticipant(peerId);
         this.events.onUserLeft?.(peerId);
         break;
@@ -705,7 +621,6 @@ export class VideoSDKCore {
     try {
       this.subscriberNegotiating = true;
 
-      // handle the negotiation, descriptors already stored
       await this.subPC.setRemoteDescription({
         type: "offer",
         sdp: msg.payload,
@@ -719,34 +634,28 @@ export class VideoSDKCore {
         payload: answer.sdp,
         user_id: this.myId,
       });
-
-      console.log("[SUB_ANSWER] Sent successfully");
     } catch (err) {
       console.error("[SUB_OFFER_ERROR]", err);
     } finally {
       this.subscriberNegotiating = false;
 
-      // Process next queued offer if any
       const next = this.subscriberOfferQueue.shift();
       if (next) {
-        console.log("[SUB_OFFER] Processing queued offer");
         await this.handleSubscriberOffer(next);
       }
     }
   }
 
-  //  PUBLISHER RENEGOTIATION
   private async createPublisherOffer() {
     if (!this.pubPC) return;
-    if (this.pubPC.signalingState !== "stable") {
-      console.warn(
-        "[Publisher] Signaling state is not stable, skipping/deferring offer creation:",
-        this.pubPC.signalingState,
-      );
+
+    if (this.pubPC.signalingState !== "stable" || this.publisherNegotiating) {
+      this.publisherOfferQueue.push(true);
       return;
     }
 
     try {
+      this.publisherNegotiating = true;
       const offer = await this.pubPC.createOffer();
       await this.pubPC.setLocalDescription(offer);
 
@@ -757,11 +666,11 @@ export class VideoSDKCore {
         room_id: this.room.id,
       });
     } catch (err) {
+      this.publisherNegotiating = false;
       console.error("[SFU Publisher Offer Error]", err);
     }
   }
 
-  //  MEDIA TOGGLES
   toggleMic() {
     const mediaState = this.state.localParticipant?.media;
     if (!mediaState) return;
@@ -798,7 +707,6 @@ export class VideoSDKCore {
     this.send({ type: "MEDIA_STATE", kind: "video", enabled: nextEnabled });
   }
 
-  //  SCREEN SHARING (SFU)
   async startScreenShare() {
     try {
       if (this.state.presenterId && this.state.presenterId !== this.myId) {
@@ -814,6 +722,7 @@ export class VideoSDKCore {
       Object.defineProperty(screenTrack, "contentHint", {
         value: "detail",
       });
+
       if (this.pubPC) {
         this.screenSender = this.pubPC.addTrack(screenTrack, this.screenStream);
         await this.createPublisherOffer();
@@ -860,7 +769,11 @@ export class VideoSDKCore {
     this.screenStream.getTracks().forEach((t) => t.stop());
 
     if (this.pubPC && this.screenSender) {
-      this.pubPC.removeTrack(this.screenSender);
+      try {
+        this.pubPC.removeTrack(this.screenSender);
+      } catch (e) {
+        console.warn("[Publisher] Could not remove track from PC:", e);
+      }
       this.screenSender = null;
       await this.createPublisherOffer();
     }
@@ -887,7 +800,6 @@ export class VideoSDKCore {
     });
   }
 
-  //  CHAT & RECONNECT
   sendChatMessage(payload: ChatInput) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.room.id)
       return;
@@ -951,6 +863,7 @@ export class VideoSDKCore {
   }
 
   private reset() {
+    window.clearTimeout(this.reconnectTimer);
     this.pubPC?.close();
     this.subPC?.close();
     this.pubPC = null;
@@ -958,11 +871,14 @@ export class VideoSDKCore {
     this.pendingTracks.clear();
     this.subscriberOfferQueue = [];
     this.subscriberNegotiating = false;
+    this.publisherOfferQueue = [];
+    this.publisherNegotiating = false;
     this.state.resetRemoteState();
   }
 
   disconnect() {
     this.intentionalDisconnect = true;
+    window.clearTimeout(this.reconnectTimer);
 
     this.stopScreenShare();
 
