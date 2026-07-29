@@ -307,6 +307,20 @@ export class VideoSDKCore {
     };
 
     this.subPC.ontrack = (event) => {
+      console.log("[ONTRACK]", {
+        mid: event.transceiver.mid,
+        kind: event.track.kind,
+        trackId: event.track.id,
+        streamIds: event.streams.map((s) => s.id),
+      });
+
+      // Try adding to a test audio/video element directly
+      if (event.track.kind === "audio") {
+        const audioEl = new Audio();
+        audioEl.srcObject = new MediaStream([event.track]);
+        audioEl.play().catch((e) => console.error("[AUDIO] Play failed:", e));
+        console.log("[AUDIO] Added directly to test element");
+      }
       const stream = event.streams[0] || new MediaStream([event.track]);
       const mid = event.transceiver.mid;
 
