@@ -489,15 +489,14 @@ export class VideoSDKCore {
       case "SUB_OFFER": {
         if (!this.subPC) break;
 
-        //  Only set if doesn't already exist
-        if (msg.track) {
-          if (!this.pendingTracks.has(msg.track.mid)) {
-            this.pendingTracks.set(msg.track.mid, msg.track);
-          } else {
-            console.debug(
-              "[SUB_OFFER] Track descriptor already exists for mid:",
-              msg.track.mid,
-            );
+        if (msg.tracks && Array.isArray(msg.tracks)) {
+          for (const trackDescriptor of msg.tracks) {
+            if (
+              trackDescriptor.mid &&
+              !this.pendingTracks.has(trackDescriptor.mid)
+            ) {
+              this.pendingTracks.set(trackDescriptor.mid, trackDescriptor);
+            }
           }
         }
 
@@ -735,7 +734,7 @@ export class VideoSDKCore {
         room_id: this.room.id,
       });
 
-      // ✅ NEW: Set timeout for answer
+      // Set timeout for answer
       this.publisherOfferTimeout = setTimeout(() => {
         if (this.publisherNegotiating) {
           console.warn(
@@ -969,6 +968,15 @@ export class VideoSDKCore {
     this.state.resetRemoteState();
   }
 
+  private resetPeerState() {
+    this.pubPC?.close();
+    this.subPC?.close();
+
+    this.pubPC = null;
+    this.subPC = null;
+
+    this.pendingTracks.clear();
+  }
   disconnect() {
     this.intentionalDisconnect = true;
     window.clearTimeout(this.reconnectTimer);
@@ -1017,7 +1025,7 @@ export class VideoSDKCore {
     this.state.setPresenterId(null);
   }
 
-  // ✅ NEW: Improved publisher ICE restart with timeout and retry limit
+  // Improved publisher ICE restart with timeout and retry limit
   private async restartPublisherIce() {
     if (!this.pubPC) return;
 
@@ -1043,7 +1051,7 @@ export class VideoSDKCore {
     }
   }
 
-  // ✅ NEW: Subscriber ICE restart (was missing)
+  // Subscriber ICE restart (was missing)
   private async restartSubscriberIce() {
     if (!this.subPC) return;
 
