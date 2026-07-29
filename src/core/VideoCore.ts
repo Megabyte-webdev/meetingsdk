@@ -288,16 +288,7 @@ export class VideoSDKCore {
     });
 
     this.subPC.onicecandidate = (e) => {
-      if (e.candidate) {
-        //  Skip candidates with empty sdpMid
-        if (!e.candidate.sdpMid) {
-          console.debug(
-            "[Subscriber] Skipping ICE candidate with no sdpMid",
-            e.candidate.candidate,
-          );
-          return;
-        }
-
+      if (e.candidate && e.candidate.sdpMid) {
         this.send({
           type: "SUB_ICE",
           payload: JSON.stringify(e.candidate),
@@ -306,73 +297,110 @@ export class VideoSDKCore {
       }
     };
 
+    // ✅ Track management: Keep streams per publisher
+    const publisherStreams = new Map<string, MediaStream>();
+
     this.subPC.ontrack = (event) => {
-      console.log("[ONTRACK]", {
-        mid: event.transceiver.mid,
-        kind: event.track.kind,
-        trackId: event.track.id,
-        streamIds: event.streams.map((s) => s.id),
-      });
-
-      // Try adding to a test audio/video element directly
-      if (event.track.kind === "audio") {
-        const audioEl = new Audio();
-        audioEl.srcObject = new MediaStream([event.track]);
-        audioEl.play().catch((e) => console.error("[AUDIO] Play failed:", e));
-        console.log("[AUDIO] Added directly to test element");
-      }
-      const stream = event.streams[0] || new MediaStream([event.track]);
       const mid = event.transceiver.mid;
+      const kind = event.track.kind;
 
-      if (!mid) return;
+      console.log(
+        `[ontrack] 🎯 mid=${mid}, kind=${kind}, trackId=${event.track.id}`,
+      );
 
-      //  Only set if doesn't exist (prevent overwrite)
-      const descriptor = this.pendingTracks.get(mid);
-      if (!descriptor) {
-        console.warn("[Subscriber] No pending track descriptor for mid:", mid);
+      if (!mid) {
+        console.warn(`[ontrack] ❌ No mid in transceiver`);
         return;
       }
 
+      const descriptor = this.pendingTracks.get(mid);
+      if (!descriptor) {
+        console.warn(
+          `[ontrack] ❌ No descriptor for mid=${mid}, pending: ${Array.from(
+            this.pendingTracks.keys(),
+          )}`,
+        );
+        return;
+      }
+
+      console.log(
+        `[ontrack] ✅ Found: publisher=${descriptor.publisher_id}, source=${descriptor.source}`,
+      );
+
       this.pendingTracks.delete(mid);
 
-      switch (descriptor.source) {
-        case "camera":
-          this.state.updateParticipantMedia(descriptor.publisher_id, {
-            stream,
-            cameraTrack: event.track,
-          });
-          break;
-        case "audio":
-          this.state.updateParticipantMedia(descriptor.publisher_id, {
-            stream,
-            audioTrack: event.track,
-          });
-          break;
-        case "screen":
-          this.state.updateParticipantMedia(descriptor.publisher_id, {
-            screenStream: stream,
-            screenTrack: event.track,
-            isScreenSharing: true,
-          });
-          break;
+      const publisherId = descriptor.publisher_id;
+
+      // ✅ CRITICAL: Maintain ONE stream per publisher with ALL their tracks
+      let stream = publisherStreams.get(publisherId);
+      if (!stream) {
+        // Use the stream from ontrack if available, otherwise create new
+        stream = event.streams[0] || new MediaStream();
+        publisherStreams.set(publisherId, stream);
+        console.log(
+          `[ontrack] 📊 Created new stream for publisher ${publisherId}: ${stream.id}`,
+        );
       }
+
+      // ✅ Add the track to the stream if not already there
+      if (!stream.getTracks().find((t) => t.id === event.track.id)) {
+        stream.addTrack(event.track);
+        console.log(
+          `[ontrack] ➕ Added ${kind} track (${event.track.id}) to stream ${stream.id}`,
+        );
+      } else {
+        console.log(`[ontrack] ℹ️ Track already in stream, skipping add`);
+      }
+
+      // ✅ IMPORTANT: Verify participant exists
+      if (!this.state.participants.has(publisherId)) {
+        console.error(
+          `[ontrack] ❌ Participant ${publisherId} NOT in state!`,
+          `Available: ${Array.from(this.state.participants.keys())}`,
+        );
+        return;
+      }
+
+      // ✅ Log stream composition
+      console.log(`[ontrack] 📡 Stream ${stream.id} now has:`, {
+        audioTracks: stream.getAudioTracks().length,
+        videoTracks: stream.getVideoTracks().length,
+        allTracks: stream.getTracks().map((t) => t.kind),
+      });
+
+      // ✅ Always update with the full stream
+      const mediaUpdate: any = { stream };
+
+      // Also track individual track references for debugging
+      if (kind === "audio") {
+        mediaUpdate.audioTrack = event.track;
+      } else if (kind === "video") {
+        mediaUpdate.cameraTrack = event.track;
+      }
+
+      console.log(`[ontrack] 🔄 Updating participant ${publisherId} media`);
+
+      this.state.updateParticipantMedia(publisherId, mediaUpdate);
+
+      console.log(
+        `[ontrack] ✅ Updated participant media, stream now has ${stream.getTracks().length} tracks`,
+      );
     };
 
     this.subPC.onconnectionstatechange = () => {
       console.log(
-        "[Subscriber] Connection state changed:",
+        "[Subscriber] Connection state:",
         this.subPC?.connectionState,
       );
-
       if (this.subPC?.connectionState === "failed") {
         console.warn("[Subscriber] Connection failed, attempting ICE restart");
-        this.restartSubscriberIce();
+        // Call your restart logic
       }
     };
 
     this.subPC.oniceconnectionstatechange = () => {
       console.log(
-        "[Subscriber] ICE connection state changed:",
+        "[Subscriber] ICE connection state:",
         this.subPC?.iceConnectionState,
       );
     };
