@@ -22,114 +22,22 @@ export const useRemoteMedia = (participantId: string) => {
 
   useEffect(() => {
     const stream = participant?.media?.stream;
-
-    console.log(`[useRemoteMedia] ${participantId} stream update:`, {
-      hasStream: !!stream,
-      streamId: stream?.id,
-      audioTracks: stream?.getAudioTracks().length || 0,
-      videoTracks: stream?.getVideoTracks().length || 0,
-    });
-
     if (!stream) return;
 
-    // ✅ VERIFY STREAM HAS TRACKS
-    const audioTracks = stream.getAudioTracks();
-    const videoTracks = stream.getVideoTracks();
-
-    console.log(`[useRemoteMedia] ${participantId} track details:`, {
-      audioTracks: audioTracks.map((t) => ({
-        id: t.id,
-        enabled: t.enabled,
-        readyState: t.readyState,
-      })),
-      videoTracks: videoTracks.map((t) => ({
-        id: t.id,
-        enabled: t.enabled,
-        readyState: t.readyState,
-      })),
-    });
-
-    // ✅ VIDEO SETUP
+    // VIDEO
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
       videoRef.current.muted = true;
       videoRef.current.playsInline = true;
-      videoRef.current.autoplay = true;
-
-      videoRef.current
-        .play()
-        .then(() => {
-          console.log(`[useRemoteMedia] ✅ Video playing: ${participantId}`);
-        })
-        .catch((err) => {
-          console.error(
-            `[useRemoteMedia] ❌ Video play failed: ${participantId}`,
-            err?.name,
-            err?.message,
-          );
-          // Browser autoplay policy - might need user gesture
-          if (err?.name === "NotAllowedError") {
-            console.warn(
-              `[useRemoteMedia] ⚠️ Autoplay blocked. Audio policy may also block audio.`,
-            );
-          }
-        });
+      videoRef.current.play().catch(() => {});
     }
 
+    // AUDIO
     if (audioRef.current) {
       audioRef.current.srcObject = stream;
-      audioRef.current.autoplay = true;
-      audioRef.current.muted = false;
-
-      const playPromise = audioRef.current.play();
-
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            console.log(`[useRemoteMedia] ✅ Audio playing: ${participantId}`);
-          })
-          .catch((err) => {
-            console.error(
-              `[useRemoteMedia] ❌ Audio play failed: ${participantId}`,
-              {
-                name: err?.name,
-                message: err?.message,
-                audioTracks: audioTracks.length,
-                enabled: audioRef.current?.muted,
-              },
-            );
-
-            // Handle different errors
-            if (err?.name === "NotAllowedError") {
-              console.warn(
-                `[useRemoteMedia] ⚠️ Autoplay blocked by browser policy`,
-              );
-              console.warn(
-                `[useRemoteMedia] Try: Click anywhere on page or unmute browser`,
-              );
-            } else if (err?.name === "NotSupportedError") {
-              console.error(
-                `[useRemoteMedia] ❌ Browser doesn't support audio playback`,
-              );
-            } else if (audioTracks.length === 0) {
-              console.warn(
-                `[useRemoteMedia] ⚠️ No audio tracks in stream! This is a server issue.`,
-              );
-            }
-          });
-      }
+      audioRef.current.play().catch(() => {});
     }
-
-    // ✅ CLEANUP: Stop tracks when component unmounts
-    return () => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      if (audioRef.current) {
-        audioRef.current.srcObject = null;
-      }
-    };
-  }, [participant?.media?.stream, participantId]);
+  }, [participant?.media?.stream]);
 
   return {
     videoRef,
