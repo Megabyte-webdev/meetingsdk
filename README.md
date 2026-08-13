@@ -2,75 +2,17 @@
 
 React/TypeScript SDK for the **DEFCOMM Rust SFU**.
 
-This package is no longer a mesh/P2P SDK. It uses the current DEFCOMM SFU architecture:
+This guide is for developers integrating the SDK into a React application. It covers installation, configuration, joining, media, participants, screen sharing, reconnection, recording, room management, signaling, and production integration.
 
-```text
-Browser
-  ├── Publisher RTCPeerConnection ── publish_offer ──> Rust SFU
-  │
-  └── Subscriber RTCPeerConnection <─ subscribe_offer ── Rust SFU
-                                      │
-                                  MediaRouter
-                                      │
-                           other participants
-```
+> **Important:** This package is an SFU client. It is **not** a mesh/P2P SDK.
 
-The SDK keeps the media and signaling responsibilities separate and uses the
-SFU-generated track ID as the authoritative bridge between signaling metadata
-and browser `MediaStreamTrack` objects.
-
-## Current SFU protocol
-
-### Client → SFU
-
-- `join`
-- `leave`
-- `publish_offer`
-- `subscribe`
-- `unsubscribe`
-- `subscribe_answer`
-- `ice_candidate`
-- `track_state`
-- `start_screen_share`
-- `stop_screen_share`
-- `start_recording`
-- `stop_recording`
-- `approve_join`
-- `reject_join`
-- `ping`
-
-### SFU → Client
-
-- `joined`
-- `join_pending`
-- `join_requested`
-- `join_approved`
-- `join_rejected`
-- `publish_answer`
-- `subscribe_offer`
-- `ice_candidate`
-- `track_published`
-- `track_unpublished`
-- `track_state_changed`
-- `participant_joined`
-- `participant_left`
-- `participant_presence`
-- `screen_share_started`
-- `screen_share_stopped`
-- `subscription_updated`
-- `recording_started`
-- `recording_stopped`
-- `pong`
-- `left`
-- `error`
-
-## Installation
+## Quick start
 
 ```bash
 npm install @afosecure/meetingsdk
 ```
 
-## Configuration
+Configure the SDK once:
 
 ```ts
 import { updateSDKConfig } from "@afosecure/meetingsdk";
@@ -81,20 +23,16 @@ updateSDKConfig({
 });
 ```
 
-Do not use the old mesh `/watch` signaling endpoint. The current SFU uses
-`/ws` plus the REST room/token APIs.
-
-## Join
+Then put your meeting UI inside `MeetingProvider`:
 
 ```tsx
 import {
   MeetingProvider,
   useMeeting,
   useParticipants,
-  useRemoteMedia,
 } from "@afosecure/meetingsdk";
 
-function Meeting({ roomId }: { roomId: string }) {
+function MeetingRoom() {
   const {
     join,
     leave,
@@ -102,44 +40,300 @@ function Meeting({ roomId }: { roomId: string }) {
     toggleCam,
     startScreenShare,
     stopScreenShare,
+    startRecording,
+    stopRecording,
   } = useMeeting();
 
   const participants = useParticipants();
 
-  // Join once from a user gesture.
-  // The SDK obtains the SFU token, opens /ws, sends JOIN, creates the
-  // publisher/subscriber PeerConnections, publishes local media and
-  // subscribes to existing remote tracks.
+  return (
+    <div>
+      <button onClick={join}>Join</button>
+      <button onClick={toggleMic}>Mic</button>
+      <button onClick={toggleCam}>Camera</button>
+      <button onClick={startScreenShare}>Share screen</button>
+      <button onClick={stopScreenShare}>Stop sharing</button>
+      <button onClick={startRecording}>Record</button>
+      <button onClick={stopRecording}>Stop recording</button>
+      <button onClick={leave}>Leave</button>
+
+      {participants.map((participant) => (
+        <div key={participant.id}>{participant.name}</div>
+      ))}
+    </div>
+  );
+}
+
+export function MeetingPage({ roomCode }: { roomCode: string }) {
+  return (
+    <MeetingProvider roomCode={roomCode} displayName="Afolabi">
+      <MeetingRoom />
+    </MeetingProvider>
+  );
 }
 ```
 
-The SDK automatically creates/stores a stable browser participant ID:
+Call `join()` from a user action so the browser can request camera/microphone permission normally. The SDK then obtains the SFU token, opens `/ws`, sends JOIN, creates publisher/subscriber PeerConnections, publishes local media, and subscribes to remote tracks. fileciteturn9file0L87-L113
+
+---
+
+# 1. Architecture
+
+The SDK uses one publisher PeerConnection and one subscriber PeerConnection per participant:
+
+```text
+Browser
+  ├── Publisher RTCPeerConnection ── publish_offer ──> Rust SFU
+  │
+  └── Subscriber RTCPeerConnection <─ subscribe_offer ── Rust SFU
+                                              │
+                                          MediaRouter
+                                              │
+                                      other participants
+```
+
+The SFU-generated track ID is the authoritative bridge between signaling metadata and browser `MediaStreamTrack` objects. fileciteturn9file0L5-L20
+
+Think of the system as:
+
+```text
+Your React application
+        │
+        ▼
+@afosecure/meetingsdk
+        │
+        ├── WebSocket signaling
+        └── WebRTC media
+                │
+                ▼
+        DEFCOMM Rust SFU
+                │
+        ┌───────┴────────┐
+        │                │
+     RTP/RTCP         Recording
+        │
+     MediaRouter
+```
+
+The application owns the UI. The SDK owns browser WebRTC/signaling orchestration. The SFU owns authoritative room and media state.
+
+---
+
+# 2. Installation
+
+```bash
+npm install @afosecure/meetingsdk
+```
+
+The package is intended for React + TypeScript applications.
+
+---
+
+# 3. Configuration
+
+```ts
+import { updateSDKConfig } from "@afosecure/meetingsdk";
+
+updateSDKConfig({
+  apiBase: "https://your-sfu.example.com/api",
+  wsBase: "wss://your-sfu.example.com/ws",
+});
+```
+
+Use:
+
+```text
+apiBase → REST API base
+wsBase  → WebSocket signaling endpoint
+```
+
+For local development:
+
+```ts
+updateSDKConfig({
+  apiBase: "http://localhost:8080/api",
+  wsBase: "ws://localhost:8080/ws",
+});
+```
+
+For production:
+
+```ts
+updateSDKConfig({
+  apiBase: "https://sfu.example.com/api",
+  wsBase: "wss://sfu.example.com/ws",
+});
+```
+
+Do **not** use the old mesh `/watch/:room` endpoint. The current SFU uses `/ws` plus REST room/token APIs. fileciteturn9file0L76-L85
+
+---
+
+# 4. Meeting lifecycle
+
+A normal meeting follows:
+
+```text
+Configure SDK
+    ↓
+MeetingProvider
+    ↓
+User clicks Join
+    ↓
+Get SFU access token
+    ↓
+Open WebSocket
+    ↓
+JOIN
+    ↓
+Create publisher/subscriber PCs
+    ↓
+Publish microphone + camera
+    ↓
+Subscribe to remote tracks
+    ↓
+Attach media to UI
+```
+
+The current protocol includes joining/leaving, SDP negotiation, subscriptions, ICE, track state, screen sharing, recording, admission control, and related events. fileciteturn9file0L22-L64
+
+---
+
+# 5. Stable participant identity
+
+The SDK creates a browser participant ID only when one does not already exist.
+
+Storage key:
 
 ```text
 defcomm:participant_id
 ```
 
-The ID is reused across page reloads. It is only generated when no stored ID
-exists.
+Therefore:
 
-For reconnect/resume, the SFU `resume_token` is stored per room:
+```text
+First load       → generate ID
+Reload           → reuse ID
+Temporary outage → reuse ID
+Reconnect        → reuse ID
+```
+
+The room-specific resume token is stored as:
 
 ```text
 defcomm:sfu:resume:<roomCode>
 ```
 
-An intentional `leave()` clears that room's resume token. A transient network
-failure does not.
+A transient network failure does not clear the resume token. An intentional `leave()` does. fileciteturn9file0L116-L132
 
-## Media model
+This distinction is critical:
 
-Each participant uses:
+```text
+Network loss
+    → reconnect/resume
 
-- one publisher PeerConnection
-- one subscriber PeerConnection
+User clicked Leave
+    → actual departure
+```
 
-The local camera and microphone are published through the publisher PC.
-Remote camera/audio/screen tracks arrive through the subscriber PC.
+---
+
+# 6. Joining a meeting
+
+```tsx
+const {
+  join,
+  leave,
+} = useMeeting();
+```
+
+Join from a user interaction:
+
+```tsx
+<button onClick={join}>Join meeting</button>
+```
+
+Leave intentionally:
+
+```tsx
+<button onClick={leave}>Leave</button>
+```
+
+Do not close the WebSocket manually to simulate leaving. Use the SDK's `leave()` method so the SFU receives the proper leave operation and local state is cleaned up.
+
+---
+
+# 7. Participant model
+
+Conceptually:
+
+```ts
+type Participant = {
+  id: string;
+  name?: string;
+
+  connectionState?:
+    | "connected"
+    | "reconnecting"
+    | "disconnected";
+
+  media?: {
+    stream?: MediaStream | null;
+    screenStream?: MediaStream | null;
+
+    cameraTrack?: MediaStreamTrack;
+    screenTrack?: MediaStreamTrack;
+    audioTrack?: MediaStreamTrack;
+
+    micEnabled: boolean;
+    camEnabled: boolean;
+    isScreenSharing: boolean;
+  };
+};
+```
+
+The SDK exposes these connection and media states for meeting UI. fileciteturn9file0L367-L385
+
+---
+
+# 8. Remote audio/video
+
+Use `useRemoteMedia(participantId)`:
+
+```tsx
+import { useRemoteMedia } from "@afosecure/meetingsdk";
+
+function RemoteMedia({ participantId }: { participantId: string }) {
+  const {
+    videoRef,
+    audioRef,
+    isCamActive,
+    isMicEnabled,
+  } = useRemoteMedia(participantId);
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+      />
+
+      <audio
+        ref={audioRef}
+        autoPlay
+      />
+    </>
+  );
+}
+```
+
+The video element is muted because remote audio is attached separately through the audio element. fileciteturn9file0L161-L178
+
+---
+
+# 9. Track mapping
 
 The SDK maps:
 
@@ -148,45 +342,47 @@ SFU TrackInfo.track_id
         ↓
 browser track.id ("track-" + id)
         ↓
-normalize track id
+normalize ID
         ↓
 TrackInfo.participant_id
         ↓
-participant MediaStream
+Participant
+        ↓
+MediaStream
 ```
 
-This avoids relying on custom properties such as
-`MediaStreamTrack.participant_id`, which browsers do not provide.
+Do not rely on:
 
-## Remote audio
+```ts
+track.participant_id
+```
 
-Remote audio is part of the participant MediaStream. Use the supplied
-`useRemoteMedia(participantId)` hook:
+Browsers do not provide `participant_id` as a standard `MediaStreamTrack` property. fileciteturn9file0L144-L159
+
+---
+
+# 10. Microphone and camera
 
 ```tsx
-const { videoRef, audioRef, isCamActive, isMicEnabled } =
-  useRemoteMedia(participantId);
-
-return (
-  <>
-    <video ref={videoRef} autoPlay playsInline muted />
-    <audio ref={audioRef} autoPlay />
-  </>
-);
+const {
+  toggleMic,
+  toggleCam,
+} = useMeeting();
 ```
 
-The video element is muted to avoid duplicate audio playback.
+Use:
 
-## Mute state
+```tsx
+<button onClick={toggleMic}>Mic</button>
+<button onClick={toggleCam}>Camera</button>
+```
 
-Mute state is **signaling authoritative**.
-
-When the local participant mutes:
+The state flow is:
 
 ```text
 toggleMic()
    ↓
-MediaStreamTrack.enabled = false
+MediaStreamTrack.enabled
    ↓
 track_state
    ↓
@@ -194,16 +390,98 @@ Rust SFU
    ↓
 track_state_changed
    ↓
-remote participant UI
+remote UI
 ```
 
-The same mechanism is used for camera state.
+The same mechanism is used for camera state. fileciteturn9file0L180-L204
 
-Do not infer another participant's microphone/video icon solely from whether a
-browser track happens to be muted. Use `Participant.media.micEnabled` and
-`Participant.media.camEnabled`, which are updated from SFU signaling.
+### Important
 
-## Screen sharing
+Remote mute/camera icons should be **signaling authoritative**.
+
+Do not infer a remote participant's state only from:
+
+```ts
+remoteTrack.muted
+```
+
+or missing RTP.
+
+Use:
+
+```ts
+participant.media?.micEnabled
+participant.media?.camEnabled
+```
+
+The SFU is authoritative for these states. fileciteturn9file0L202-L204
+
+---
+
+# 11. Professional participant tile
+
+A participant tile should combine media and connection state:
+
+```tsx
+function ParticipantTile({ participant }: { participant: Participant }) {
+  const reconnecting =
+    participant.connectionState === "reconnecting";
+
+  const micEnabled =
+    participant.media?.micEnabled ?? false;
+
+  const camEnabled =
+    participant.media?.camEnabled ?? false;
+
+  const sharing =
+    participant.media?.isScreenSharing ?? false;
+
+  return (
+    <div className="participant-tile">
+      {reconnecting && (
+        <span className="reconnecting">
+          Reconnecting...
+        </span>
+      )}
+
+      <video autoPlay playsInline muted />
+
+      <div>{participant.name}</div>
+
+      <MicIcon muted={!micEnabled} />
+      <CameraIcon off={!camEnabled} />
+
+      {sharing && <ScreenShareIcon />}
+    </div>
+  );
+}
+```
+
+Recommended mapping:
+
+```text
+connectionState
+    ↓
+reconnecting badge
+
+micEnabled
+    ↓
+microphone icon
+
+camEnabled
+    ↓
+camera icon
+
+isScreenSharing
+    ↓
+screen-share layout
+```
+
+fileciteturn9file0L387-L405
+
+---
+
+# 12. Screen sharing
 
 Screen sharing is a separate publication with:
 
@@ -211,28 +489,21 @@ Screen sharing is a separate publication with:
 source = "screen"
 ```
 
-The SDK does not merge it into the participant camera stream.
+It is not the participant's camera. fileciteturn9file0L206-L233
 
-```ts
+Start:
+
+```tsx
 await startScreenShare();
 ```
 
-and:
+Stop:
 
-```ts
-stopScreenShare();
+```tsx
+await stopScreenShare();
 ```
 
-The SDK also sends explicit:
-
-```text
-start_screen_share
-stop_screen_share
-```
-
-messages so the SFU can maintain authoritative screen-share state.
-
-The remote participant receives:
+Remote state:
 
 ```ts
 participant.media.screenStream
@@ -240,28 +511,47 @@ participant.media.screenTrack
 participant.media.isScreenSharing
 ```
 
-A UI should therefore render screen share as a separate primary stage rather
-than replacing the participant's camera tile.
+fileciteturn9file0L235-L244
 
-## Reconnection
-
-The SDK intentionally does **not** destroy the local MediaStream when the
-signaling WebSocket temporarily disappears.
+Recommended layout:
 
 ```text
-network interruption
+┌───────────────────────────────────────────────┐
+│                                               │
+│                 SCREEN SHARE                  │
+│                                               │
+│                                               │
+└───────────────────────────────────────────────┘
+
+  ┌────────┐  ┌────────┐  ┌────────┐
+  │ Afolabi│  │  Mega  │  │  John  │
+  └────────┘  └────────┘  └────────┘
+```
+
+The screen should be the primary stage. Participant cameras should become a secondary strip.
+
+Do not attach the screen track to the participant camera element.
+
+---
+
+# 13. Reconnection and resume
+
+The SDK is designed to resume the same logical participant after a temporary network/signaling failure:
+
+```text
+Network interruption
        ↓
 WebSocket closes
        ↓
-participant becomes reconnecting
+participant = reconnecting
        ↓
-token refresh
+refresh access token
        ↓
-JOIN with resume_token
+JOIN + resume_token
        ↓
 same logical participant
        ↓
-new publisher/subscriber PeerConnections
+new publisher/subscriber PCs
        ↓
 republish local tracks
        ↓
@@ -272,45 +562,108 @@ fresh ICE/SDP
 connected
 ```
 
-The SDK uses exponential reconnect delays and refreshes the SFU access token
-before reconnecting.
+The SDK intentionally does not immediately destroy the local MediaStream when signaling temporarily disappears. It uses reconnect delays and refreshes the access token before reconnecting. fileciteturn9file0L246-L275
 
-## Admission control
+### UI rule
+
+During a transient outage:
+
+```text
+Reconnecting...
+```
+
+should be shown rather than immediately removing the participant.
+
+Only treat the participant as gone after the SFU reports an actual departure/disconnection.
+
+---
+
+# 14. Leave correctly
+
+Intentional departure:
+
+```tsx
+await leave();
+```
+
+Do not manually close:
+
+```ts
+websocket.close();
+```
+
+to implement the Leave button.
+
+The intended lifecycle is:
+
+```text
+Leave button
+    ↓
+leave
+    ↓
+SFU acknowledgement
+    ↓
+destroy PeerConnections
+    ↓
+clear room resume token
+    ↓
+remove local meeting state
+```
+
+A temporary network failure is different and should use reconnect/resume.
+
+---
+
+# 15. Private-room admission
 
 For private rooms:
 
-```ts
+```tsx
 const {
   approveJoinRequest,
   rejectJoinRequest,
 } = useMeeting();
 ```
 
-The SFU remains authoritative. The SDK does not invent approval state locally.
+Approve:
 
-## Recording
+```tsx
+await approveJoinRequest(participantId);
+```
 
-Recording is **server-side**. The browser does not use `MediaRecorder`.
+Reject:
 
-Moderators can call:
+```tsx
+await rejectJoinRequest(participantId);
+```
 
-```ts
+The SFU remains authoritative. The SDK does not fabricate approval state locally. fileciteturn9file0L278-L289
+
+---
+
+# 16. Server-side recording
+
+Recording is **server-side**. The browser does not use `MediaRecorder`. fileciteturn9file0L291-L340
+
+Start:
+
+```tsx
 await startRecording();
 ```
 
-and:
+Stop:
 
-```ts
+```tsx
 await stopRecording();
 ```
 
-Recording status:
+Status:
 
-```ts
+```tsx
 const { recording } = await getRecordingStatus();
 ```
 
-The signaling lifecycle is:
+Lifecycle:
 
 ```text
 startRecording()
@@ -322,7 +675,7 @@ Rust SFU RecordingManager
 recording_started
 ```
 
-and:
+Stop:
 
 ```text
 stopRecording()
@@ -334,101 +687,192 @@ RecordingManager finalizes
 recording_stopped
 ```
 
-The SFU records RTP independently of subscriber browsers, so a participant
-closing/reconnecting does not make the recording dependent on that browser.
+The recording belongs to the meeting/server rather than a particular browser. Recording permissions are enforced by the SFU. fileciteturn9file0L291-L340
 
-Recording permissions are enforced by the SFU.
+---
 
-## Room API
+# 17. Room management
 
-The SDK also exposes:
+Create:
 
-```ts
-const room = await getRoom(roomCode);
-
-const created = await createRoom({
+```tsx
+const room = await createRoom({
   name: "Engineering",
   capacity: 100,
   is_private: true,
 });
+```
 
+Get:
+
+```tsx
+const room = await getRoom(roomCode);
+```
+
+Delete:
+
+```tsx
 await deleteRoom(roomCode);
 ```
 
-## Preview
+These use the REST API. fileciteturn9file0L342-L355
 
-The old mesh SDK used a `/watch/:room` WebSocket preview endpoint. That endpoint
-is not part of the current Rust SFU.
+---
 
-`useMeetingPreview()` therefore uses the current REST room endpoint and does
-not fabricate a live participant count. Live participant/media state begins
-after joining through `/ws`.
+# 18. Preview
 
-## Participant state
-
-```ts
-type Participant = {
-  id: string;
-  name?: string;
-  connectionState?: "connected" | "reconnecting" | "disconnected";
-  media?: {
-    stream?: MediaStream | null;
-    screenStream?: MediaStream | null;
-    cameraTrack?: MediaStreamTrack;
-    screenTrack?: MediaStreamTrack;
-    audioTrack?: MediaStreamTrack;
-    micEnabled: boolean;
-    camEnabled: boolean;
-    isScreenSharing: boolean;
-  };
-};
-```
-
-A professional participant tile should therefore use:
+The old mesh SDK used:
 
 ```text
-connectionState
-    ↓
-reconnecting badge
-
-media.micEnabled
-    ↓
-microphone icon
-
-media.camEnabled
-    ↓
-camera icon
-
-media.isScreenSharing
-    ↓
-screen-share layout
+/watch/:room
 ```
 
-## Build
+That endpoint is not part of the current Rust SFU.
 
-```bash
-npm install
-npm run build
-```
+`useMeetingPreview()` therefore uses the current REST room endpoint and does not fabricate live participant/media state. Live participant/media state begins after joining through `/ws`. fileciteturn9file0L358-L365
 
-The package emits:
+---
+
+# 19. Current signaling protocol
+
+### Client → SFU
 
 ```text
-dist/index.js
-dist/index.mjs
-dist/index.d.ts
-dist/index.d.mts
+join
+leave
+publish_offer
+subscribe
+unsubscribe
+subscribe_answer
+ice_candidate
+track_state
+start_screen_share
+stop_screen_share
+start_recording
+stop_recording
+approve_join
+reject_join
+ping
 ```
 
-## Important architectural rule
+### SFU → Client
 
-Do not reintroduce mesh behavior into this SDK.
+```text
+joined
+join_pending
+join_requested
+join_approved
+join_rejected
+publish_answer
+subscribe_offer
+ice_candidate
+track_published
+track_unpublished
+track_state_changed
+participant_joined
+participant_left
+participant_presence
+screen_share_started
+screen_share_stopped
+subscription_updated
+recording_started
+recording_stopped
+pong
+left
+error
+```
 
-The SFU is responsible for:
+fileciteturn9file0L22-L64
+
+---
+
+# 20. Recommended React structure
+
+```text
+MeetingPage
+│
+└── MeetingProvider
+    │
+    ├── MeetingHeader
+    │   ├── Room name
+    │   ├── Connection state
+    │   └── Recording indicator
+    │
+    ├── MeetingStage
+    │   ├── ScreenShareStage
+    │   └── ActiveSpeakerStage
+    │
+    ├── ParticipantStrip
+    │   └── ParticipantTile[]
+    │       ├── Video
+    │       ├── Name
+    │       ├── Mic icon
+    │       ├── Camera icon
+    │       └── Reconnecting badge
+    │
+    └── MeetingControls
+        ├── Mic
+        ├── Camera
+        ├── Screen share
+        ├── Record
+        └── Leave
+```
+
+The SDK supplies media and meeting state. Your application owns the visual design.
+
+---
+
+# 21. Error handling
+
+Catch operations that can fail:
+
+```tsx
+try {
+  await join();
+} catch (error) {
+  console.error("Unable to join meeting", error);
+}
+```
+
+Your UI should distinguish:
+
+```text
+Connecting
+Reconnecting
+Connected
+Disconnected
+Join rejected
+```
+
+Do not show "left the meeting" for a temporary ICE/WebSocket interruption.
+
+---
+
+# 22. Do not reintroduce mesh logic
+
+Never create a PeerConnection per remote participant.
+
+Wrong:
+
+```text
+A ↔ B
+A ↔ C
+B ↔ C
+```
+
+Correct:
+
+```text
+A ──┐
+B ──┼──► SFU ──► participants
+C ──┘
+```
+
+The SFU owns:
 
 - participant identity
-- admission
 - room membership
+- admission
 - SDP negotiation
 - ICE
 - track publication
@@ -439,7 +883,7 @@ The SFU is responsible for:
 - screen-share state
 - server-side recording
 
-The browser SDK is responsible for:
+The browser SDK owns:
 
 - browser media permissions
 - publisher/subscriber PeerConnections
@@ -449,7 +893,28 @@ The browser SDK is responsible for:
 - reconnect/resume orchestration
 - React bindings
 
-The current Rust SFU's media path is:
+fileciteturn9file0L423-L450
+
+---
+
+# 23. Build
+
+```bash
+npm install
+npm run build
+```
+
+Expected output:
+
+```text
+dist/
+├── index.js
+├── index.mjs
+├── index.d.ts
+└── index.d.mts
+```
+
+The SDK consumes the SFU media path:
 
 ```text
 Publisher
@@ -471,4 +936,65 @@ SDK TrackInfo mapping
 Participant MediaStream
 ```
 
-This is the architecture the SDK is built to consume.
+fileciteturn9file0L452-L474
+
+---
+
+# 24. Production checklist
+
+Before shipping:
+
+- [ ] Configure `apiBase` and `wsBase`.
+- [ ] Use HTTPS/WSS in production.
+- [ ] Render hooks inside `MeetingProvider`.
+- [ ] Call `join()` from a user action.
+- [ ] Handle camera/microphone permissions.
+- [ ] Render remote video and audio separately.
+- [ ] Keep video elements muted when remote audio is attached separately.
+- [ ] Use SFU signaling for remote mic/camera icons.
+- [ ] Render screen sharing separately from camera.
+- [ ] Show `Reconnecting...` during transient network loss.
+- [ ] Do not remove a participant immediately on temporary connection loss.
+- [ ] Use `leave()` for intentional departure.
+- [ ] Do not create mesh PeerConnections.
+- [ ] Restrict recording controls to authorized users.
+- [ ] Treat recording as server-side.
+- [ ] Test reload, reconnect, leave, and rejoin.
+- [ ] Run `npm run build` before publishing.
+- [ ] Keep the SDK and SFU signaling protocol versions compatible.
+
+---
+
+# 25. Developer mental model
+
+The simplest mental model is:
+
+```text
+YOUR APPLICATION
+      │
+      │ UI + meeting controls
+      ▼
+@afosecure/meetingsdk
+      │
+      ├── React hooks
+      ├── WebSocket signaling
+      ├── Publisher PC
+      ├── Subscriber PC
+      ├── Media attachment
+      └── Reconnect/resume
+      │
+      ▼
+DEFCOMM RUST SFU
+      │
+      ├── Rooms
+      ├── Participants
+      ├── Admission
+      ├── SDP / ICE
+      ├── Track registry
+      ├── MediaRouter
+      ├── RTCP feedback
+      ├── Screen-share state
+      └── Recording
+```
+
+**Key rule:** the application owns presentation, the SDK owns browser WebRTC, and the SFU owns authoritative meeting/media state.
