@@ -1,5 +1,5 @@
 {
-  "name": "@defcomm/meetingsdk",
+  "name": "@afosecure/meetingsdk",
   "version": "2.0.0",
   "description": "React/TypeScript meeting SDK for the DEFCOMM Rust SFU",
   "main": "./dist/index.js",
